@@ -47,6 +47,14 @@ on:
         description: "Max screen session hours (1-5)"
         required: false
         default: "1"
+      browser_link:
+        description: "Publish browser link (noVNC via Tailscale Funnel)?"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
 concurrency:
   group: mac-screen-session
@@ -187,19 +195,73 @@ jobs:
           echo "Password set for user 'runner' (value masked in logs)."
 
       # -- 6. Enable Apple Screen Sharing (VNC, port 5900) --
+      # Legacy VNC password auth is REQUIRED: without -setvnclegacy,
+      # standard VNC clients (RealVNC, noVNC) fail with
+      # "Security negotiation failed" against macOS native auth.
       - name: Enable Screen Sharing
         run: |
           set -euo pipefail
+          PW="${{ secrets.VNC_PASSWORD }}"
+          if [[ -z "$PW" ]]; then
+            echo "VNC_PASSWORD secret is not set."
+            exit 1
+          fi
           ARD="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
           sudo "$ARD" -activate -configure \
             -allowAccessFor -allUsers \
             -privs -all \
+            -configure -clientopts -setvnclegacy -vnclegacy yes \
+            -configure -clientopts -setvncpw -vncpw "$PW" \
             -restart -agent -menu
           sleep 3
           if nc -z localhost 5900 2>/dev/null; then
-            echo "Screen Sharing is LISTENING on port 5900."
+            echo "Screen Sharing is LISTENING on port 5900 (legacy VNC auth on)."
           else
             echo "WARNING: port 5900 check inconclusive, continuing anyway."
+          fi
+
+      # -- 6b. Browser access: noVNC + websockify + Tailscale Funnel --
+      # Serves the Mac screen as a web page; Funnel publishes a public
+      # https://...ts.net link you open in Chrome. No VNC client needed.
+      # Best-effort: if Funnel is unavailable, VNC-over-tailnet still works.
+      - name: Publish browser link
+        if: github.event.inputs.browser_link == 'true'
+        run: |
+          set -uo pipefail
+          echo "Installing websockify..."
+          python3 -m pip install --quiet websockify 2>/dev/null \
+            || python3 -m pip install --quiet --break-system-packages websockify \
+            || echo "WARNING: websockify install failed, browser link unavailable."
+          echo "Downloading noVNC client..."
+          rm -rf /tmp/novnc
+          if git clone --depth 1 https://github.com/novnc/noVNC.git /tmp/novnc 2>/dev/null; then
+            echo "noVNC downloaded."
+          else
+            echo "WARNING: noVNC download failed, browser link unavailable."
+            exit 0
+          fi
+          echo "Starting websockify (6080 -> VNC 5900)..."
+          nohup python3 -m websockify --web /tmp/novnc 6080 localhost:5900 \
+            > /tmp/websockify.log 2>&1 &
+          sleep 3
+          if nc -z localhost 6080 2>/dev/null; then
+            echo "Web client listening on 6080."
+          else
+            echo "WARNING: websockify did not start. Log:"
+            cat /tmp/websockify.log 2>/dev/null || true
+            exit 0
+          fi
+          echo "Publishing public link via Tailscale Funnel..."
+          FUNNEL_OUT=$(tailscale funnel --bg http://localhost:6080 2>&1 || true)
+          echo "$FUNNEL_OUT"
+          FUNNEL_URL=$(echo "$FUNNEL_OUT" | grep -oE 'https://[^ ]+' | head -1 || true)
+          if [[ -n "$FUNNEL_URL" ]]; then
+            echo "FUNNEL_URL=$FUNNEL_URL" >> "$GITHUB_ENV"
+            echo "Browser link live: $FUNNEL_URL"
+          else
+            echo "WARNING: Funnel did not return a URL."
+            echo "Check in Tailscale admin: DNS > MagicDNS ON, HTTPS certs ON,"
+            echo "and Access Controls allow Funnel. VNC-over-tailnet still works."
           fi
 
       # -- 7. Connection info --
@@ -221,6 +283,12 @@ jobs:
           echo ""
           echo "  From MAC: Finder > Cmd+K > vnc://$TS_IP"
           echo ""
+          if [[ -n "${FUNNEL_URL:-}" ]]; then
+            echo "  BROWSER LINK (open in Chrome, no install needed):"
+            echo "    $FUNNEL_URL/vnc.html"
+            echo "    Enter the VNC password when asked."
+            echo ""
+          fi
           echo "  Session limit: ${{ github.event.inputs.session_hours }}h"
           echo "  To end early:  Cancel workflow from Actions tab"
           echo "======================================================="
@@ -246,8 +314,10 @@ jobs:
         run: |
           rm -rf "$HOME/workspace/private-code" 2>/dev/null || true
           echo "Private code removed."
+          pkill -f websockify 2>/dev/null || true
+          tailscale funnel --off 6080 2>/dev/null || true
           tailscale logout 2>/dev/null || true
-          echo "Tailscale disconnected."
+          echo "Browser link closed. Tailscale disconnected."
           ARD="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
           sudo "$ARD" -deactivate -configure -access -off 2>/dev/null || true
           echo "Screen Sharing disabled. VM will be destroyed by GitHub."
