@@ -1,0 +1,253 @@
+###############################################################################
+# mac-screen.yml
+#
+# Builds your code on a GitHub-hosted Mac (Azure hardware is x86/ARM cloud,
+# macOS runners are real Apple Silicon Macs in GitHub's datacenter), then
+# opens Apple Screen Sharing (VNC) over Tailscale for GUI verification.
+#
+# NOTE: macOS does not speak RDP. Remote desktop on Mac = VNC Screen Sharing
+# on port 5900. From your side it looks identical: a desktop window you
+# control with mouse + keyboard.
+#
+# Security layers (same as rdp-cloud-vm.yml):
+#   1. workflow_dispatch only - forks/PRs cannot trigger
+#   2. Actor validation - repo owner or ALLOWED_ACTORS only
+#   3. protected-cloud environment gate
+#   4. Password from VNC_PASSWORD secret, never hardcoded, never logged
+#   5. Tailscale mesh only - no public ports, no public IPs
+#   6. One session at a time (concurrency lock)
+#   7. Build runs FIRST - screen session is for verification
+#   8. if: always() cleanup - code removed, tailnet logout, sharing disabled
+#
+# Required secrets in public repo:
+#   TAILSCALE_AUTHKEY   - ephemeral auth key from Tailscale admin panel
+#   VNC_PASSWORD        - password for the 'runner' VNC login
+#   ALLOWED_ACTORS      - comma-separated GitHub usernames
+#   PRIVATE_REPO_TOKEN  - only needed if private_repo input is set
+###############################################################################
+
+name: Build and Verify (Mac Screen)
+
+on:
+  workflow_dispatch:
+    inputs:
+      private_repo:
+        description: "Private repo to build (owner/name) - empty skips build"
+        required: false
+        default: ""
+      private_branch:
+        description: "Branch to build"
+        required: false
+        default: "main"
+      build_command:
+        description: "Build command override (empty = auto-detect)"
+        required: false
+        default: ""
+      session_hours:
+        description: "Max screen session hours (1-5)"
+        required: false
+        default: "1"
+
+concurrency:
+  group: mac-screen-session
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    environment: protected-cloud
+    outputs:
+      authorized: ${{ steps.check.outputs.authorized }}
+    steps:
+      - name: Validate actor identity
+        id: check
+        run: |
+          ACTOR="${{ github.actor }}"
+          OWNER="${{ github.repository_owner }}"
+          ALLOWED="${{ secrets.ALLOWED_ACTORS }}"
+          if [[ "$ACTOR" == "$OWNER" ]]; then
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+            echo "Authorized: repo owner."
+            exit 0
+          fi
+          if [[ -n "$ALLOWED" ]]; then
+            IFS=',' read -ra ACTORS <<< "$ALLOWED"
+            for a in "${ACTORS[@]}"; do
+              a=$(echo "$a" | xargs)
+              if [[ "$ACTOR" == "$a" ]]; then
+                echo "authorized=true" >> "$GITHUB_OUTPUT"
+                echo "Authorized: in allowed list."
+                exit 0
+              fi
+            done
+          fi
+          echo "authorized=false" >> "$GITHUB_OUTPUT"
+          echo "DENIED: '$ACTOR' is not authorized."
+          exit 1
+
+  build-and-verify:
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 350
+
+    steps:
+      # -- 1. Clone private repo (skipped when input empty) --
+      - name: Clone private repository
+        if: ${{ github.event.inputs.private_repo != '' }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.event.inputs.private_repo }}"
+          BRANCH="${{ github.event.inputs.private_branch }}"
+          TOKEN="${{ secrets.PRIVATE_REPO_TOKEN }}"
+          if [[ -z "$TOKEN" ]]; then
+            echo "PRIVATE_REPO_TOKEN secret is not set."
+            exit 1
+          fi
+          git clone --depth 1 --branch "$BRANCH" \
+            "https://x-access-token:${TOKEN}@github.com/${REPO}.git" \
+            "$HOME/workspace/private-code"
+          echo "Cloned to $HOME/workspace/private-code"
+
+      # -- 2. Build (skipped when no repo given) --
+      - name: Build project
+        if: ${{ github.event.inputs.private_repo != '' }}
+        working-directory: ~/workspace/private-code
+        run: |
+          set -euo pipefail
+          CMD="${{ github.event.inputs.build_command }}"
+          if [[ -n "$CMD" ]]; then
+            echo "Custom build: $CMD"
+            eval "$CMD"
+            exit 0
+          fi
+          if ls *.xcworkspace 1>/dev/null 2>&1; then
+            SCHEME=$(xcodebuild -list -workspace *.xcworkspace 2>/dev/null \
+              | awk '/Schemes:/,/^$/' | sed '1d;/^$/d' | head -1 | xargs)
+            xcodebuild -workspace *.xcworkspace -scheme "$SCHEME" \
+              -configuration Release -derivedDataPath build \
+              -destination 'generic/platform=macOS' build | tail -20
+          elif ls *.xcodeproj 1>/dev/null 2>&1; then
+            SCHEME=$(xcodebuild -list -project *.xcodeproj 2>/dev/null \
+              | awk '/Schemes:/,/^$/' | sed '1d;/^$/d' | head -1 | xargs)
+            xcodebuild -project *.xcodeproj -scheme "$SCHEME" \
+              -configuration Release -derivedDataPath build \
+              -destination 'generic/platform=macOS' build | tail -20
+          elif [[ -f Package.swift ]]; then
+            swift build -c release
+          elif [[ -f package.json ]]; then
+            [[ -f package-lock.json ]] && npm ci || npm install
+            npm run build --if-present
+          elif [[ -f Cargo.toml ]]; then
+            cargo build --release
+          elif [[ -f go.mod ]]; then
+            go build -o build/output ./...
+          elif [[ -f CMakeLists.txt ]]; then
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+            cmake --build build --config Release
+          elif [[ -f Makefile ]]; then
+            make release 2>/dev/null || make
+          else
+            echo "WARNING: unknown project type, pass build_command."
+          fi
+
+      # -- 3. Upload artifacts --
+      - name: Upload build artifacts
+        if: ${{ github.event.inputs.private_repo != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-build-${{ github.run_number }}
+          path: |
+            ~/workspace/private-code/build/
+            ~/workspace/private-code/.build/release/
+            ~/workspace/private-code/dist/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # -- 4. Join Tailscale network --
+      - name: Connect Tailscale
+        id: tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          hostname: mac-builder-${{ github.run_id }}
+
+      # -- 5. Set VNC password on runner user --
+      - name: Set screen sharing password
+        run: |
+          set -euo pipefail
+          PW="${{ secrets.VNC_PASSWORD }}"
+          if [[ -z "$PW" ]]; then
+            echo "VNC_PASSWORD secret is not set."
+            exit 1
+          fi
+          # macOS-native password set (no chpasswd on macOS)
+          sudo sysadminctl -resetPasswordFor runner -newPassword "$PW"
+          echo "Password set for user 'runner' (value masked in logs)."
+
+      # -- 6. Enable Apple Screen Sharing (VNC, port 5900) --
+      - name: Enable Screen Sharing
+        run: |
+          set -euo pipefail
+          ARD="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+          sudo "$ARD" -activate -configure \
+            -allowAccessFor -allUsers \
+            -privs -all \
+            -restart -agent -menu
+          sleep 3
+          if nc -z localhost 5900 2>/dev/null; then
+            echo "Screen Sharing is LISTENING on port 5900."
+          else
+            echo "WARNING: port 5900 check inconclusive, continuing anyway."
+          fi
+
+      # -- 7. Connection info --
+      - name: Print connection info
+        run: |
+          TS_IP=$(tailscale ip -4)
+          echo ""
+          echo "======================================================="
+          echo "  MAC SCREEN SHARING READY"
+          echo "======================================================="
+          echo ""
+          echo "  Address:   $TS_IP"
+          echo "  Port:      5900 (VNC / Apple Screen Sharing)"
+          echo "  Username:  runner"
+          echo "  Password:  (your VNC_PASSWORD secret)"
+          echo ""
+          echo "  From WINDOWS: RealVNC Viewer / TightVNC / TigerVNC"
+          echo "    -> File > New connection > $TS_IP:5900"
+          echo ""
+          echo "  From MAC: Finder > Cmd+K > vnc://$TS_IP"
+          echo ""
+          echo "  Session limit: ${{ github.event.inputs.session_hours }}h"
+          echo "  To end early:  Cancel workflow from Actions tab"
+          echo "======================================================="
+
+      # -- 8. Keep alive --
+      - name: Screen session
+        run: |
+          MAX_HOURS=${{ github.event.inputs.session_hours }}
+          MAX_MIN=$((MAX_HOURS * 60))
+          ELAPSED=0
+          echo "Screen session live for up to ${MAX_HOURS}h."
+          while [[ $ELAPSED -lt $MAX_MIN ]]; do
+            REMAIN=$((MAX_MIN - ELAPSED))
+            echo "[$(date +%H:%M:%S)] Active - ${REMAIN}m remaining"
+            sleep 300
+            ELAPSED=$((ELAPSED + 5))
+          done
+          echo "Session limit reached. Shutting down."
+
+      # -- 9. Secure cleanup - ALWAYS runs --
+      - name: Secure cleanup
+        if: always()
+        run: |
+          rm -rf "$HOME/workspace/private-code" 2>/dev/null || true
+          echo "Private code removed."
+          tailscale logout 2>/dev/null || true
+          echo "Tailscale disconnected."
+          ARD="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+          sudo "$ARD" -deactivate -configure -access -off 2>/dev/null || true
+          echo "Screen Sharing disabled. VM will be destroyed by GitHub."
