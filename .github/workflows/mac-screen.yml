@@ -225,7 +225,29 @@ jobs:
             echo "WARNING: port 5900 check inconclusive, continuing anyway."
           fi
 
-      # -- 6b. Browser access: noVNC + websockify + Tailscale Funnel --
+      # -- 6b. Diagnose offered VNC auth types (ground truth) --
+      # Reads the RFB handshake straight off port 5900 and prints which
+      # security types the server offers. Type 2 = classic VNC password
+      # (what TigerVNC needs). Types 30+ = Apple proprietary auth.
+      - name: Diagnose VNC auth types
+        run: |
+          python3 - <<'EOF'
+          import socket
+          s = socket.create_connection(("localhost", 5900), timeout=10)
+          ver = s.recv(12)
+          print("RFB version:", ver)
+          s.sendall(ver)
+          data = s.recv(256)
+          print("security bytes:", data.hex())
+          if len(data) >= 1:
+              n = data[0]
+              types = list(data[1:1+n])
+              print("offered security types:", types)
+              print("classic VNCAuth (2) offered:", 2 in types)
+          s.close()
+          EOF
+
+      # -- 6c. Browser access: noVNC + websockify + Tailscale Funnel --
       # Serves the Mac screen as a web page; Funnel publishes a public
       # https://...ts.net link you open in Chrome. No VNC client needed.
       # Best-effort: if Funnel is unavailable, VNC-over-tailnet still works.
