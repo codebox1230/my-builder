@@ -212,7 +212,11 @@ jobs:
           # BOTH auth paths accept the same VNC_PASSWORD:
           # - Apple user login (username runner + password) for native clients
           # - Legacy VNC password (password only) for standard VNC/noVNC
-          sudo "$ARD" -activate -configure \
+          # Password is supplied BOTH ways because -setvncpw prompts
+          # interactively on some macOS builds (ignoring -vncpw) and reads
+          # the flag on others. The pipe answers a prompt; the flag covers
+          # non-interactive parsing. One of the two always lands.
+          printf '%s' "$PW" | sudo "$ARD" -activate -configure \
             -allowAccessFor -allUsers \
             -privs -all \
             -configure -clientopts -setvnclegacy -vnclegacy yes \
