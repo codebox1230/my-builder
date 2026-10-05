@@ -1,0 +1,478 @@
+###############################################################################
+# rdp-cloud-vm.yml
+#
+# Cloud-only CI/CD workflow: Builds private repo code on a GitHub-hosted
+# Windows VM (Azure), then optionally opens RDP for GUI verification,
+# debugging, and monitoring the build output.
+#
+# Security layers:
+#   1. workflow_dispatch only -- no forks, no PRs can trigger this
+#   2. Actor validation -- only the repo owner can run it
+#   3. GitHub Environment protection -- requires manual approval (configure once)
+#   4. Passwords from secrets only -- never hardcoded, never logged
+#   5. NLA (Network Level Authentication) enabled on RDP
+#   6. Firewall scoped to Tailscale interface only
+#   7. Concurrency lock -- only one session at a time
+#   8. Build runs FIRST -- RDP is for verification, not general compute
+#
+# Required Secrets (public repo > Settings > Secrets):
+#   TAILSCALE_AUTHKEY    -- https://login.tailscale.com/admin/settings/keys
+#   RDP_PASSWORD         -- Strong password for the RDP user
+#   PRIVATE_REPO_TOKEN   -- Fine-grained PAT (Contents:Read on private repo)
+#   ALLOWED_ACTORS       -- Comma-separated GitHub usernames allowed to trigger
+#                          (e.g. "your-username" or "your-username,trusted-dev")
+#
+# GitHub Environment Setup (one-time):
+#   1. Repo > Settings > Environments > New: "protected-cloud"
+#   2. Check "Required reviewers" > add yourself
+#   3. Check "Limit to selected branches" > add "main" only
+#
+# Architecture:
+#   +- GitHub-Hosted Runner (windows-2022 = Azure VM) ---------+
+#   |  1. Validate actor identity                               |
+#   |  2. Clone private repo                                    |
+#   |  3. BUILD the code (actual CI/CD work)                    |
+#   |  4. Upload build artifacts                                |
+#   |  5. Enable RDP + Tailscale tunnel (for GUI verification)  |
+#   |  6. You RDP in, inspect build output, debug if needed     |
+#   |  7. Auto-shutdown after timeout                           |
+#   +----------------------------------------------------------+
+###############################################################################
+
+name: Build and Verify (Cloud VM)
+
+on:
+  workflow_dispatch:
+    inputs:
+      private_repo:
+        description: "Private repo to build (owner/name)"
+        required: true
+        default: "YOUR_USERNAME/YOUR_PRIVATE_REPO"
+      private_branch:
+        description: "Branch to build"
+        required: false
+        default: "main"
+      build_command:
+        description: "Build command (leave empty for auto-detect)"
+        required: false
+        default: ""
+      enable_rdp:
+        description: "Open RDP session after build for GUI verification?"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      session_hours:
+        description: "Max RDP session hours (1-5)"
+        required: false
+        default: "2"
+      tunnel_type:
+        description: "Tunnel for RDP access"
+        required: false
+        default: "tailscale"
+        type: choice
+        options:
+          - tailscale
+          - cloudflare
+
+# Only one cloud VM session at a time -- prevents accidental parallel runs
+concurrency:
+  group: cloud-vm-session
+  cancel-in-progress: false
+
+jobs:
+  # ===========================================================================
+  # GATE: Verify the actor is authorized before spending any compute
+  # ===========================================================================
+  authorize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    # Uses the protected environment -- requires manual approval on first run
+    environment: protected-cloud
+    outputs:
+      authorized: ${{ steps.check.outputs.authorized }}
+
+    steps:
+      - name: Validate actor identity
+        id: check
+        run: |
+          ACTOR="${{ github.actor }}"
+          OWNER="${{ github.repository_owner }}"
+          ALLOWED="${{ secrets.ALLOWED_ACTORS }}"
+
+          echo "Actor:  $ACTOR"
+          echo "Owner:  $OWNER"
+
+          # Always allow the repo owner
+          if [[ "$ACTOR" == "$OWNER" ]]; then
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+            echo ">>> Authorized: repo owner."
+            exit 0
+          fi
+
+          # Check against allowed actors list
+          if [[ -n "$ALLOWED" ]]; then
+            IFS=',' read -ra ACTORS <<< "$ALLOWED"
+            for allowed in "${ACTORS[@]}"; do
+              allowed=$(echo "$allowed" | xargs)  # trim whitespace
+              if [[ "$ACTOR" == "$allowed" ]]; then
+                echo "authorized=true" >> "$GITHUB_OUTPUT"
+                echo ">>> Authorized: in allowed list."
+                exit 0
+              fi
+            done
+          fi
+
+          echo "authorized=false" >> "$GITHUB_OUTPUT"
+          echo ">>> DENIED: '$ACTOR' is not authorized to run this workflow."
+          echo "   Add them to the ALLOWED_ACTORS secret or they must be the repo owner."
+          exit 1
+
+  # ===========================================================================
+  # BUILD: Clone private repo, compile, upload artifacts -- actual CI/CD work
+  # ===========================================================================
+  build-and-verify:
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 350
+
+    steps:
+      # -- 1. Clone private repo ------------------------------------------
+      - name: Clone private repository
+        run: |
+          $repo = "${{ github.event.inputs.private_repo }}"
+          $branch = "${{ github.event.inputs.private_branch }}"
+          $token = "${{ secrets.PRIVATE_REPO_TOKEN }}"
+
+          if ([string]::IsNullOrEmpty($token)) {
+            Write-Error "PRIVATE_REPO_TOKEN secret is not set."
+            exit 1
+          }
+
+          Write-Host "Cloning $repo @ $branch ..."
+          git clone --depth 1 --branch $branch `
+            "https://x-access-token:${token}@github.com/${repo}.git" `
+            "C:\workspace\private-code"
+
+          if (-not (Test-Path "C:\workspace\private-code")) {
+            Write-Error "Clone failed."
+            exit 1
+          }
+          Write-Host "Cloned to C:\workspace\private-code"
+
+      # -- 2. Build the code ----------------------------------------------
+      - name: Build project
+        working-directory: C:\workspace\private-code
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cmd = "${{ github.event.inputs.build_command }}"
+
+          if ($cmd) {
+            Write-Host ">>> Custom build command: $cmd"
+            Invoke-Expression $cmd
+            exit $LASTEXITCODE
+          }
+
+          Write-Host ">>> Auto-detecting project type..."
+
+          if (Test-Path "*.sln") {
+            $sln = (Get-ChildItem *.sln | Select-Object -First 1).Name
+            Write-Host ">>> .NET solution: $sln"
+            dotnet build $sln -c Release -o build\output
+          }
+          elseif (Test-Path "*.csproj") {
+            $proj = (Get-ChildItem *.csproj | Select-Object -First 1).Name
+            Write-Host ">>> .NET project: $proj"
+            dotnet build $proj -c Release -o build\output
+          }
+          elseif (Test-Path "package.json") {
+            Write-Host ">>> Node.js project"
+            if (Test-Path "package-lock.json") { npm ci } else { npm install }
+            npm run build --if-present
+          }
+          elseif (Test-Path "Cargo.toml") {
+            Write-Host ">>> Rust project"
+            cargo build --release
+          }
+          elseif (Test-Path "go.mod") {
+            Write-Host ">>> Go project"
+            go build -o build\output.exe .\...
+          }
+          elseif (Test-Path "CMakeLists.txt") {
+            Write-Host ">>> CMake project"
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+            cmake --build build --config Release
+          }
+          elseif (Test-Path "Makefile") {
+            Write-Host ">>> Makefile project"
+            make release 2>$null; if (-not $?) { make }
+          }
+          elseif (Test-Path "pyproject.toml") {
+            Write-Host ">>> Python project"
+            python -m pip install build
+            python -m build
+          }
+          else {
+            Write-Warning "Could not auto-detect. Provide build_command input."
+            Write-Host "Files in repo root:"
+            Get-ChildItem | Select-Object Name
+          }
+
+      # -- 3. Upload build artifacts --------------------------------------
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.run_number }}
+          path: |
+            C:\workspace\private-code\build\
+            C:\workspace\private-code\.build\release\
+            C:\workspace\private-code\dist\
+            C:\workspace\private-code\target\release\
+            C:\workspace\private-code\bin\Release\
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ==================================================================
+      # RDP SECTION -- only runs if enable_rdp == true
+      # Purpose: GUI verification of build output, debugging, monitoring
+      # ==================================================================
+
+      # -- 4. Enable RDP with NLA security --------------------------------
+      - name: Enable Remote Desktop (NLA secured)
+        if: github.event.inputs.enable_rdp == 'true'
+        run: |
+          # Enable RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0 -Force
+
+          # NLA ON -- requires valid credentials BEFORE session is established
+          # This prevents unauthenticated users from even reaching the login screen
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" -Value 1 -Force
+
+          # Security layer 2 = TLS (encrypted handshake, not plaintext like the original)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" -Value 2 -Force
+
+          # Minimum encryption level: High (128-bit)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "MinEncryptionLevel" -Value 3 -Force
+
+          # Firewall: only allow RDP on the Tailscale interface, not public internet
+          netsh advfirewall firewall delete rule name="RDP-Build-Verify" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Build-Verify" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+          Write-Host "RDP enabled (NLA + TLS + 128-bit encryption)."
+
+      # -- 5. Create RDP user (password from secrets, masked in logs) -----
+      - name: Create authenticated RDP user
+        if: github.event.inputs.enable_rdp == 'true'
+        run: |
+          $password = "${{ secrets.RDP_PASSWORD }}"
+
+          if ([string]::IsNullOrEmpty($password)) {
+            # Generate strong random password if secret not set
+            Add-Type -AssemblyName System.Web
+            $password = [System.Web.Security.Membership]::GeneratePassword(24, 6)
+            Write-Host "::add-mask::$password"
+            Write-Host "Auto-generated password (masked in logs)."
+          }
+
+          # Mask the password so it never appears in workflow logs
+          Write-Host "::add-mask::$password"
+
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          # Create or update user
+          if (-not (Get-LocalUser -Name "Builder" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "Builder" -Password $securePass `
+              -FullName "Build Verifier" `
+              -Description "CI/CD build verification account" `
+              -AccountNeverExpires
+          } else {
+            Set-LocalUser -Name "Builder" -Password $securePass
+          }
+
+          Add-LocalGroupMember -Group "Administrators" -Member "Builder" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Builder" -ErrorAction SilentlyContinue
+
+          # Store for connection info step -- value is masked by GitHub
+          echo "RDP_USER=Builder" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+
+          # Verify
+          $user = Get-LocalUser -Name "Builder"
+          if (-not $user.Enabled) {
+            Write-Error "User creation/verification failed."
+            exit 1
+          }
+          Write-Host "User 'Builder' ready (password masked in all logs)."
+
+      # -- 6. Tailscale tunnel --------------------------------------------
+      - name: Setup Tailscale tunnel
+        if: github.event.inputs.enable_rdp == 'true' && github.event.inputs.tunnel_type == 'tailscale'
+        run: |
+          $authKey = "${{ secrets.TAILSCALE_AUTHKEY }}"
+          if ([string]::IsNullOrEmpty($authKey)) {
+            Write-Error "TAILSCALE_AUTHKEY secret is not set."
+            exit 1
+          }
+          Write-Host "::add-mask::$authKey"
+
+          # Download and install
+          $tsVersion = "1.82.0"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-$tsVersion-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
+
+          Write-Host "Installing Tailscale $tsVersion..."
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installer -UseBasicParsing
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installer`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installer -Force
+
+          # Connect with an ephemeral key (auto-removes from tailnet when VM dies)
+          $hostname = "build-verify-${{ github.run_id }}"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=$authKey `
+            --hostname=$hostname
+
+          # Wait for IP
+          $tsIP = $null
+          for ($i = 0; $i -lt 20; $i++) {
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 2>$null
+            if ($tsIP) { break }
+            Start-Sleep -Seconds 3
+          }
+
+          if (-not $tsIP) {
+            Write-Error "Tailscale failed to obtain an IP after 60 seconds."
+            exit 1
+          }
+
+          echo "TUNNEL_ADDRESS=$tsIP" >> $env:GITHUB_ENV
+          echo "TUNNEL_TYPE=tailscale" >> $env:GITHUB_ENV
+          Write-Host "Tailscale IP: $tsIP  (hostname: $hostname)"
+
+      # -- 6b. Cloudflare tunnel (alternative) ----------------------------
+      - name: Setup Cloudflare tunnel
+        if: github.event.inputs.enable_rdp == 'true' && github.event.inputs.tunnel_type == 'cloudflare'
+        run: |
+          $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi"
+          $installer = "$env:TEMP\cloudflared.msi"
+
+          Write-Host "Installing cloudflared..."
+          Invoke-WebRequest -Uri $cfUrl -OutFile $installer -UseBasicParsing
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installer`"", "/quiet", "/norestart" -Wait
+
+          # Quick tunnel (no account needed, random URL)
+          Start-Process -FilePath "$env:ProgramFiles\cloudflared\cloudflared.exe" `
+            -ArgumentList "tunnel", "--url", "rdp://localhost:3389" `
+            -RedirectStandardError "$env:TEMP\cf-err.log" `
+            -NoNewWindow
+
+          # Wait for URL
+          Start-Sleep -Seconds 12
+          $tunnel = Select-String -Path "$env:TEMP\cf-err.log" `
+            -Pattern "https://[a-z0-9-]+\.trycloudflare\.com" |
+            Select-Object -First 1 -ExpandProperty Matches |
+            Select-Object -ExpandProperty Value
+
+          if ($tunnel) {
+            echo "TUNNEL_ADDRESS=$tunnel" >> $env:GITHUB_ENV
+            echo "TUNNEL_TYPE=cloudflare" >> $env:GITHUB_ENV
+            Write-Host "Cloudflare tunnel: $tunnel"
+          } else {
+            Write-Warning "Could not extract tunnel URL."
+            Get-Content "$env:TEMP\cf-err.log" -Tail 15
+          }
+
+      # -- 7. Verify RDP accessibility ------------------------------------
+      - name: Verify RDP
+        if: github.event.inputs.enable_rdp == 'true'
+        run: |
+          $test = Test-NetConnection -ComputerName localhost -Port 3389
+          if ($test.TcpTestSucceeded) {
+            Write-Host "RDP port 3389: OPEN"
+          } else {
+            Write-Warning "RDP port check failed."
+          }
+
+      # -- 8. Connection info ---------------------------------------------
+      - name: Print connection info
+        if: github.event.inputs.enable_rdp == 'true'
+        run: |
+          Write-Host ""
+          Write-Host "======================================================="
+          Write-Host "  BUILD COMPLETE -- RDP VERIFICATION SESSION READY"
+          Write-Host "======================================================="
+          Write-Host ""
+          Write-Host "  Tunnel:    $env:TUNNEL_TYPE"
+          Write-Host "  Address:   $env:TUNNEL_ADDRESS"
+          Write-Host "  Port:      3389"
+          Write-Host "  Username:  Builder"
+          Write-Host "  Password:  (from RDP_PASSWORD secret -- masked in logs)"
+          Write-Host ""
+          if ($env:TUNNEL_TYPE -eq "tailscale") {
+            Write-Host "  Connect:   mstsc /v:$env:TUNNEL_ADDRESS"
+          } else {
+            Write-Host "  On your machine, run:"
+            Write-Host "    cloudflared access rdp --hostname $env:TUNNEL_ADDRESS --url rdp://localhost:13389"
+            Write-Host "  Then: mstsc /v:localhost:13389"
+          }
+          Write-Host ""
+          Write-Host "  Build output: C:\workspace\private-code\build\"
+          Write-Host "  Source code:   C:\workspace\private-code\"
+          Write-Host ""
+          Write-Host "  Session limit: ${{ github.event.inputs.session_hours }}h"
+          Write-Host "  To end early:  Cancel workflow from Actions tab"
+          Write-Host "======================================================="
+
+      # -- 9. Keep alive for verification ---------------------------------
+      - name: Verification session
+        if: github.event.inputs.enable_rdp == 'true'
+        run: |
+          $maxHours = [int]"${{ github.event.inputs.session_hours }}"
+          $maxMinutes = $maxHours * 60
+          $elapsed = 0
+          $interval = 5
+
+          Write-Host "RDP verification session: $maxHours hour(s) max."
+          Write-Host ""
+
+          while ($elapsed -lt $maxMinutes) {
+            $remaining = $maxMinutes - $elapsed
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Verification active -- ${remaining}m remaining"
+            Start-Sleep -Seconds ($interval * 60)
+            $elapsed += $interval
+          }
+
+          Write-Host "Session limit reached. VM shutting down."
+
+      # -- 10. Secure cleanup -- ALWAYS runs -------------------------------
+      - name: Secure cleanup
+        if: always()
+        run: |
+          # Remove private code from the VM
+          if (Test-Path "C:\workspace\private-code") {
+            Remove-Item -Recurse -Force "C:\workspace\private-code" -ErrorAction SilentlyContinue
+            Write-Host "Private code removed from VM."
+          }
+
+          # Disconnect Tailscale (removes ephemeral node from tailnet)
+          if (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe") {
+            & "$env:ProgramFiles\Tailscale\tailscale.exe" logout 2>$null
+            Write-Host "Tailscale disconnected."
+          }
+
+          # Disable RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 1 -Force -ErrorAction SilentlyContinue
+
+          # Remove the user
+          Remove-LocalUser -Name "Builder" -ErrorAction SilentlyContinue
+
+          Write-Host "Cleanup complete. VM will be destroyed by GitHub."

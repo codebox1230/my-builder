@@ -1,0 +1,211 @@
+###############################################################################
+# build-private.yml
+#
+# Builds your private repo code entirely in the cloud. Zero local compute.
+#
+# Two modes:
+#   Mode A -- GitHub-hosted runner (their Azure VM, free on public repos)
+#   Mode B -- Self-hosted runner on YOUR Azure VM (via Cirun or Terraform)
+#
+# Required Secrets:
+#   PRIVATE_REPO_TOKEN  -- Fine-grained PAT with read-only Contents on private repo(s)
+###############################################################################
+
+name: Build Private Repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Private repo (owner/name)"
+        required: true
+        default: "YOUR_USERNAME/YOUR_PRIVATE_REPO"
+      branch:
+        description: "Branch / tag / SHA to build"
+        required: false
+        default: "main"
+      runner:
+        description: "Runner target"
+        required: true
+        default: "windows-2022"
+        type: choice
+        options:
+          - windows-2022          # GitHub-hosted Windows (free on public repo)
+          - ubuntu-latest         # GitHub-hosted Linux   (free on public repo)
+          - macos-latest          # GitHub-hosted macOS   (free on public repo)
+          - cirun-azure-win       # Your Azure Windows VM via Cirun
+          - cirun-azure-linux     # Your Azure Linux VM via Cirun
+      build_command:
+        description: "Build command override (optional)"
+        required: false
+        default: ""
+      artifact_path:
+        description: "Artifact path override (optional)"
+        required: false
+        default: ""
+
+  repository_dispatch:
+    types: [build-requested]
+
+env:
+  TARGET_REPO: ${{ github.event.inputs.repo || github.event.client_payload.repo || 'YOUR_USERNAME/YOUR_PRIVATE_REPO' }}
+  TARGET_BRANCH: ${{ github.event.inputs.branch || github.event.client_payload.branch || 'main' }}
+  BUILD_CMD: ${{ github.event.inputs.build_command || github.event.client_payload.build_command || '' }}
+  ARTIFACT_PATH: ${{ github.event.inputs.artifact_path || github.event.client_payload.artifact_path || '' }}
+
+jobs:
+  build:
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 120
+
+    steps:
+      # -- 1. Clean ------------------------------------------------------
+      - name: Clean workspace
+        shell: bash
+        run: rm -rf "$GITHUB_WORKSPACE/private-code" 2>/dev/null || true
+
+      # -- 2. Checkout private repo --------------------------------------
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ env.TARGET_BRANCH }}
+          path: private-code
+          fetch-depth: 1
+
+      # -- 3. Auto-detect and build --------------------------------------
+      - name: Build (Linux / macOS)
+        if: runner.os != 'Windows'
+        working-directory: private-code
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$BUILD_CMD" ]]; then
+            echo ">>> Custom build: $BUILD_CMD"
+            eval "$BUILD_CMD"
+            exit 0
+          fi
+
+          echo ">>> Auto-detecting project type..."
+
+          if ls *.xcworkspace 1>/dev/null 2>&1; then
+            SCHEME=$(xcodebuild -list -workspace *.xcworkspace 2>/dev/null \
+                     | awk '/Schemes:/,/^$/' | sed '1d;/^$/d' | head -1 | xargs)
+            xcodebuild -workspace *.xcworkspace -scheme "$SCHEME" \
+              -configuration Release -derivedDataPath build \
+              -destination 'generic/platform=macOS' build | tail -20
+          elif ls *.xcodeproj 1>/dev/null 2>&1; then
+            SCHEME=$(xcodebuild -list -project *.xcodeproj 2>/dev/null \
+                     | awk '/Schemes:/,/^$/' | sed '1d;/^$/d' | head -1 | xargs)
+            xcodebuild -project *.xcodeproj -scheme "$SCHEME" \
+              -configuration Release -derivedDataPath build \
+              -destination 'generic/platform=macOS' build | tail -20
+          elif [[ -f Package.swift ]]; then
+            swift build -c release
+          elif [[ -f package.json ]]; then
+            if [[ -f package-lock.json ]]; then npm ci;
+            elif [[ -f yarn.lock ]]; then yarn install --frozen-lockfile;
+            elif [[ -f pnpm-lock.yaml ]]; then pnpm install --frozen-lockfile;
+            else npm install; fi
+            npm run build --if-present
+          elif [[ -f Cargo.toml ]]; then
+            cargo build --release
+          elif [[ -f go.mod ]]; then
+            go build -o build/output ./...
+          elif [[ -f pyproject.toml ]] || [[ -f setup.py ]]; then
+            python3 -m pip install build && python3 -m build
+          elif [[ -f CMakeLists.txt ]]; then
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+          elif [[ -f Makefile ]]; then
+            make release 2>/dev/null || make
+          else
+            echo "ERROR: Unknown project type. Pass build_command."
+            exit 1
+          fi
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        working-directory: private-code
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $cmd = "$env:BUILD_CMD"
+          if ($cmd) {
+            Write-Host ">>> Custom build: $cmd"
+            Invoke-Expression $cmd
+            return
+          }
+
+          Write-Host ">>> Auto-detecting project type..."
+
+          if (Test-Path "*.sln") {
+            $sln = (Get-ChildItem *.sln | Select-Object -First 1).Name
+            Write-Host ">>> .NET solution: $sln"
+            dotnet build $sln -c Release -o build\output
+          }
+          elseif (Test-Path "*.csproj") {
+            $proj = (Get-ChildItem *.csproj | Select-Object -First 1).Name
+            dotnet build $proj -c Release -o build\output
+          }
+          elseif (Test-Path "package.json") {
+            Write-Host ">>> Node.js project"
+            if (Test-Path "package-lock.json") { npm ci } else { npm install }
+            npm run build --if-present
+          }
+          elseif (Test-Path "Cargo.toml") {
+            Write-Host ">>> Rust project"
+            cargo build --release
+          }
+          elseif (Test-Path "go.mod") {
+            Write-Host ">>> Go project"
+            go build -o build\output.exe .\...
+          }
+          elseif (Test-Path "CMakeLists.txt") {
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+            cmake --build build --config Release
+          }
+          else {
+            Write-Error "Unknown project type. Pass build_command."
+            exit 1
+          }
+
+      # -- 4. Locate and upload artifacts --------------------------------
+      - name: Locate artifacts
+        id: artifacts
+        shell: bash
+        working-directory: private-code
+        run: |
+          if [[ -n "$ARTIFACT_PATH" ]]; then
+            echo "path=$ARTIFACT_PATH" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for dir in build/Release build/release build/output .build/release \
+                     dist target/release bin/Release build/Build/Products/Release; do
+            if [[ -d "$dir" ]]; then
+              echo "path=$dir" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          if [[ -d build ]]; then
+            echo "path=build" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload artifacts
+        if: steps.artifacts.outputs.path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.run_number }}
+          path: private-code/${{ steps.artifacts.outputs.path }}
+          retention-days: 30
+          if-no-files-found: warn
+
+      # -- 5. Secure cleanup ---------------------------------------------
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: rm -rf "$GITHUB_WORKSPACE/private-code"

@@ -1,0 +1,75 @@
+# Cirun Configuration
+# Drop this file in the ROOT of your PUBLIC repo.
+#
+# Cirun.io is a SaaS that auto-provisions cloud VMs as ephemeral GitHub Actions
+# runners. When a workflow job starts, Cirun spins up a fresh VM in YOUR cloud
+# account, registers it as a self-hosted runner, runs the job, and destroys it.
+#
+# Supports: Azure, AWS, GCP, DigitalOcean, Oracle Cloud
+# Free for open-source / public repos (you pay only cloud compute costs).
+#
+# Setup:
+#   1. Go to https://cirun.io and connect your GitHub account
+#   2. Connect your Azure (or AWS) cloud credentials
+#   3. Push this file to your public repo
+#   4. Use  runs-on: cirun-azure-win  or  cirun-azure-linux  in your workflows
+
+runners:
+
+  # -- Windows Runner (Azure Spot VM -- up to 90% cheaper) -------------------
+  - name: cirun-azure-win
+    cloud: azure
+    instance_type: Standard_D4s_v5       # 4 vCPU, 16 GB RAM -- good for builds
+    machine_image:
+      publisher: MicrosoftWindowsServer
+      offer: WindowsServer
+      sku: 2022-Datacenter-Azure-Edition
+      version: latest
+    region: eastus
+    preemptible: true                     # Spot VM -- massive cost savings
+    labels:
+      - cirun-azure-win
+    custom_data: |
+      # This runs on first boot inside the VM (PowerShell)
+      # Install common dev tools via winget / choco
+      Set-ExecutionPolicy Bypass -Scope Process -Force
+      [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+      iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+      choco install -y git nodejs python3 golang rust visualstudio2022buildtools
+
+  # -- Linux Runner (Azure Spot VM) -----------------------------------------
+  - name: cirun-azure-linux
+    cloud: azure
+    instance_type: Standard_D4s_v5
+    machine_image:
+      publisher: Canonical
+      offer: 0001-com-ubuntu-server-jammy
+      sku: 22_04-lts-gen2
+      version: latest
+    region: eastus
+    preemptible: true
+    labels:
+      - cirun-azure-linux
+    custom_data: |
+      #!/bin/bash
+      set -euo pipefail
+      apt-get update && apt-get install -y build-essential git curl wget unzip
+      # Node
+      curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
+      # Rust
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      # Go
+      wget -q https://go.dev/dl/go1.23.0.linux-amd64.tar.gz -O /tmp/go.tar.gz
+      tar -C /usr/local -xzf /tmp/go.tar.gz
+      echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
+
+  # -- macOS Runner (AWS -- Azure macOS requires Dedicated Host, AWS is cheaper)
+  # Uncomment if you need macOS builds. Requires AWS credentials in Cirun.
+  # - name: cirun-aws-macos
+  #   cloud: aws
+  #   instance_type: mac2.metal           # Apple Silicon
+  #   machine_image: ami-XXXXXXXXX        # macOS Sonoma AMI for your region
+  #   region: us-east-1
+  #   preemptible: false                  # Mac instances can't be Spot
+  #   labels:
+  #     - cirun-aws-macos
