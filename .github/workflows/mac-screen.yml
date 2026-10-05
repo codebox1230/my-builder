@@ -181,19 +181,6 @@ jobs:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
           hostname: mac-builder-${{ github.run_id }}
 
-      # -- 5. Set VNC password on runner user --
-      - name: Set screen sharing password
-        run: |
-          set -euo pipefail
-          PW="${{ secrets.VNC_PASSWORD }}"
-          if [[ -z "$PW" ]]; then
-            echo "VNC_PASSWORD secret is not set."
-            exit 1
-          fi
-          # macOS-native password set (no chpasswd on macOS)
-          sudo sysadminctl -resetPasswordFor runner -newPassword "$PW"
-          echo "Password set for user 'runner' (value masked in logs)."
-
       # -- 6. Enable Apple Screen Sharing (VNC, port 5900) --
       # Legacy VNC password auth is REQUIRED: without -setvnclegacy,
       # standard VNC clients (RealVNC, noVNC) fail with
@@ -207,9 +194,12 @@ jobs:
             exit 1
           fi
           ARD="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+          # Password-ONLY auth (no username prompt), mirroring TigerVNC's
+          # classic RFB mode used by docker-ubuntu-desktop:
+          # -allowAccessFor -none disables Apple user auth entirely,
+          # leaving ONLY the legacy VNC password challenge.
           sudo "$ARD" -activate -configure \
-            -allowAccessFor -allUsers \
-            -privs -all \
+            -allowAccessFor -none \
             -configure -clientopts -setvnclegacy -vnclegacy yes \
             -configure -clientopts -setvncpw -vncpw "$PW" \
             -restart -agent -menu
@@ -292,8 +282,7 @@ jobs:
           echo "======================================================="
           echo ""
           echo "  Address:   $TS_IP"
-          echo "  Port:      5900 (VNC / Apple Screen Sharing)"
-          echo "  Username:  runner"
+          echo "  Port:      5900 (VNC, password-only - no username)"
           echo "  Password:  (your VNC_PASSWORD secret)"
           echo ""
           echo "  From WINDOWS: RealVNC Viewer / TightVNC / TigerVNC"
@@ -305,7 +294,7 @@ jobs:
           echo "    https://$TS_IP:6080/vnc.html"
           echo "    Chrome will warn 'connection is not private' (self-signed"
           echo "    cert on a throwaway VM) -> Advanced -> Proceed."
-          echo "    Enter the VNC password when asked."
+          echo "    Password only - no username. Enter your VNC_PASSWORD."
           echo ""
           if [[ -n "${FUNNEL_URL:-}" ]]; then
             echo "  PUBLIC LINK (works from any network, no Tailscale needed):"
