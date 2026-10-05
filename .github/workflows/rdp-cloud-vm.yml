@@ -140,8 +140,9 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      # -- 1. Clone private repo ------------------------------------------
+      # -- 1. Clone private repo (skipped when input empty) ----------------
       - name: Clone private repository
+        if: ${{ github.event.inputs.private_repo != '' }}
         run: |
           $repo = "${{ github.event.inputs.private_repo }}"
           $branch = "${{ github.event.inputs.private_branch }}"
@@ -165,6 +166,7 @@ jobs:
 
       # -- 2. Build the code ----------------------------------------------
       - name: Build project
+        if: ${{ github.event.inputs.private_repo != '' }}
         working-directory: C:\workspace\private-code
         run: |
           $ErrorActionPreference = "Stop"
@@ -223,6 +225,7 @@ jobs:
 
       # -- 3. Upload build artifacts --------------------------------------
       - name: Upload build artifacts
+        if: ${{ github.event.inputs.private_repo != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: build-${{ github.run_number }}
