@@ -240,28 +240,46 @@ jobs:
             echo "WARNING: noVNC download failed, browser link unavailable."
             exit 0
           fi
-          echo "Starting websockify (6080 -> VNC 5900)..."
-          nohup python3 -m websockify --web /tmp/novnc 6080 localhost:5900 \
-            > /tmp/websockify.log 2>&1 &
+          # Self-signed cert: browsers require HTTPS for the WebCrypto API
+          # that Apple ARD authentication needs. Users click through
+          # the one-time "not private" warning (throwaway VM, safe here).
+          echo "Generating self-signed TLS certificate..."
+          openssl req -x509 -newkey rsa:2048 \
+            -keyout /tmp/novnc-key.pem -out /tmp/novnc-cert.pem \
+            -days 1 -nodes -subj "/CN=mac-builder" 2>/dev/null
+          echo "Starting websockify with TLS (6080 -> VNC 5900)..."
+          nohup python3 -m websockify --web /tmp/novnc \
+            --cert /tmp/novnc-cert.pem --key /tmp/novnc-key.pem \
+            6080 localhost:5900 > /tmp/websockify.log 2>&1 &
           sleep 3
           if nc -z localhost 6080 2>/dev/null; then
-            echo "Web client listening on 6080."
+            echo "Web client listening on 6080 (HTTPS, self-signed)."
           else
             echo "WARNING: websockify did not start. Log:"
             cat /tmp/websockify.log 2>/dev/null || true
             exit 0
           fi
-          echo "Publishing public link via Tailscale Funnel..."
-          FUNNEL_OUT=$(tailscale funnel --bg http://localhost:6080 2>&1 || true)
-          echo "$FUNNEL_OUT"
-          FUNNEL_URL=$(echo "$FUNNEL_OUT" | grep -oE 'https://[^ ]+' | head -1 || true)
+          # Funnel is time-boxed: run in background, poll for URL up to
+          # 60s, then move on regardless so a stuck Funnel never blocks
+          # the session. Direct tailnet link always works as fallback.
+          echo "Publishing public link via Tailscale Funnel (60s max)..."
+          tailscale funnel --bg http://localhost:6080 > /tmp/funnel.log 2>&1 || true
+          FUNNEL_URL=""
+          for i in $(seq 1 12); do
+            sleep 5
+            FUNNEL_URL=$(grep -oE 'https://[^ ]+' /tmp/funnel.log 2>/dev/null | head -1 || true)
+            if [[ -n "$FUNNEL_URL" ]]; then break; fi
+          done
           if [[ -n "$FUNNEL_URL" ]]; then
             echo "FUNNEL_URL=$FUNNEL_URL" >> "$GITHUB_ENV"
             echo "Browser link live: $FUNNEL_URL"
           else
-            echo "WARNING: Funnel did not return a URL."
-            echo "Check in Tailscale admin: DNS > MagicDNS ON, HTTPS certs ON,"
-            echo "and Access Controls allow Funnel. VNC-over-tailnet still works."
+            echo "WARNING: Funnel did not return a URL within 60s. Log:"
+            cat /tmp/funnel.log 2>/dev/null || true
+            echo "Direct tailnet link (works from your devices, no Funnel needed)"
+            echo "will be printed below. If you need a public link, check in"
+            echo "Tailscale admin: DNS > MagicDNS ON, HTTPS certs ON,"
+            echo "Access Controls allow Funnel."
           fi
 
       # -- 7. Connection info --
@@ -283,10 +301,15 @@ jobs:
           echo ""
           echo "  From MAC: Finder > Cmd+K > vnc://$TS_IP"
           echo ""
+          echo "  BROWSER LINK (open in Chrome, no install needed):"
+          echo "    https://$TS_IP:6080/vnc.html"
+          echo "    Chrome will warn 'connection is not private' (self-signed"
+          echo "    cert on a throwaway VM) -> Advanced -> Proceed."
+          echo "    Enter the VNC password when asked."
+          echo ""
           if [[ -n "${FUNNEL_URL:-}" ]]; then
-            echo "  BROWSER LINK (open in Chrome, no install needed):"
+            echo "  PUBLIC LINK (works from any network, no Tailscale needed):"
             echo "    $FUNNEL_URL/vnc.html"
-            echo "    Enter the VNC password when asked."
             echo ""
           fi
           echo "  Session limit: ${{ github.event.inputs.session_hours }}h"
