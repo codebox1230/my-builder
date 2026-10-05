@@ -50,7 +50,7 @@ on:
       browser_link:
         description: "Publish browser link (noVNC via Tailscale Funnel)?"
         required: false
-        default: "true"
+        default: "false"
         type: choice
         options:
           - "true"
