@@ -59,6 +59,32 @@ uploaded, source wiped. Local working copy: `C:\Users\prati\public-repo-builder`
   a hang; the step is bounded except download/install/`up`.
 - Keep files ASCII-only. Non-ASCII comment art once broke Windows YAML reads.
 
+## SSH access (agents operate VMs from here)
+
+- Session VMs join Tailscale and run SSH: Windows = OpenSSH Server
+  (PowerShell default shell) on port 22, macOS = Remote Login.
+- Key auth: local key `~/.ssh/cloud-builder`, pubkey in `SSH_PUBKEY` secret,
+  installed to `authorized_keys` at boot.
+- Windows gotcha (verified live): members of Administrators IGNORE the
+  per-user `authorized_keys` — the key must ALSO go in
+  `C:\ProgramData\ssh\administrators_authorized_keys` (SYSTEM-owned,
+  inheritance stripped), or key auth fails closed.
+- From here: `ssh -i ~/.ssh/cloud-builder -o BatchMode=yes Builder@<ip>`
+  (Windows) or `runner@<ip>` (macOS). Peer IPs via `tailscale status`;
+  hostnames embed run IDs. Never launch GUI `mstsc` sessions from scripts.
+
+## CLI (`cli/cloudvm.ps1`)
+
+Single-file PowerShell CLI over `gh` + Tailscale + OpenSSH. No param()
+block on purpose (`--flags` must flow through as plain strings; also
+PowerShell swallows a bare `--`, so remote commands use `-c "..."`).
+Commands: `status` | `up --os windows|mac [--hours N]` |
+`ssh [--os ..] [-c "cmd"]` (no `-c` = interactive) |
+`push <local> <remote>` / `pull <remote> <local>` |
+`down [--os ..]` (matches by workflow name: `*Mac*` vs `*Cloud VM*`,
+never touches headless builds) | `build --repo owner/name ...` (waits,
+downloads artifacts to `.cloud-build-artifacts/<run-id>/`).
+
 ## Before pushing workflow changes
 
 1. YAML-parse every file as UTF-8; PowerShell blocks via the .NET parser,
