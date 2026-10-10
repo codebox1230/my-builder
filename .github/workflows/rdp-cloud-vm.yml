@@ -347,7 +347,21 @@ jobs:
             icacls $sshDir /grant:r "SYSTEM:(OI)(CI)F"
             icacls $sshDir /grant:r "BUILTIN\Administrators:(OI)(CI)F"
             icacls $sshDir /grant:r "Builder:(OI)(CI)F"
-            Write-Host "Key auth installed for Builder."
+            icacls "$sshDir\authorized_keys" /setowner "Builder"
+            # Windows OpenSSH IGNORES per-user authorized_keys for members
+            # of Administrators. Builder is an admin, so the key must ALSO
+            # live in the machine-wide file (verified live: key auth fails
+            # without this, succeeds with it).
+            $adminKeys = "C:\ProgramData\ssh\administrators_authorized_keys"
+            if (-not (Test-Path $adminKeys)) {
+              New-Item -ItemType File -Path $adminKeys -Force | Out-Null
+            }
+            Add-Content -Path $adminKeys -Value $pubkey
+            icacls $adminKeys /inheritance:r
+            icacls $adminKeys /grant:r "SYSTEM:(F)"
+            icacls $adminKeys /grant:r "BUILTIN\Administrators:(F)"
+            icacls $adminKeys /setowner "NT AUTHORITY\SYSTEM"
+            Write-Host "Key auth installed for Builder (user + admin key files)."
           } else {
             Write-Host "SSH_PUBKEY not set; password auth only."
           }
