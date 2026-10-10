@@ -229,7 +229,24 @@ jobs:
             echo "WARNING: port 5900 check inconclusive, continuing anyway."
           fi
 
-      # -- 6b. Diagnose offered VNC auth types (ground truth) --
+      # -- 6b. Enable Remote Login (SSH agent + SCP access) --
+      - name: Enable Remote Login (SSH)
+        run: |
+          set -euo pipefail
+          sudo systemsetup -setremotelogin on
+          KEY="${{ secrets.SSH_PUBKEY }}"
+          if [[ -n "$KEY" ]]; then
+            mkdir -p ~/.ssh && chmod 700 ~/.ssh
+            echo "$KEY" > ~/.ssh/authorized_keys
+            chmod 600 ~/.ssh/authorized_keys
+            echo "Key auth installed for runner."
+          else
+            echo "SSH_PUBKEY not set; password auth only."
+          fi
+          sudo systemsetup -getremotelogin
+          nc -z localhost 22 && echo "SSH port 22: OPEN"
+
+      # -- 6c. Diagnose offered VNC auth types (ground truth) --
       # Reads the RFB handshake straight off port 5900 and prints which
       # security types the server offers. Type 2 = classic VNC password
       # (what TigerVNC needs). Types 30+ = Apple proprietary auth.

@@ -316,6 +316,52 @@ jobs:
           }
           Write-Host "User 'Builder' ready (password masked in all logs)."
 
+      # -- 5b. Enable OpenSSH Server (agent + SCP access) ------------------
+      - name: Enable OpenSSH Server
+        if: github.event.inputs.enable_rdp == 'true'
+        run: |
+          # OpenSSH Server ships with the image; ensure present, then start
+          try {
+            Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+          } catch {
+            Write-Host "OpenSSH Server capability already present (or install skipped)."
+          }
+          Start-Service sshd
+          Set-Service -Name sshd -StartupType 'Automatic'
+
+          # PowerShell as the default SSH shell (agent-friendly)
+          New-ItemProperty -Path "HKLM:\SOFTWARE\OpenSSH" `
+            -Name DefaultShell `
+            -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
+            -PropertyType String -Force
+
+          # Key auth from SSH_PUBKEY secret (non-interactive agent logins).
+          # Windows OpenSSH REFUSES authorized_keys with loose ACLs, so
+          # inheritance is stripped and only SYSTEM/Admins/Builder remain.
+          $pubkey = "${{ secrets.SSH_PUBKEY }}"
+          if (-not [string]::IsNullOrEmpty($pubkey)) {
+            $sshDir = "C:\Users\Builder\.ssh"
+            New-Item -ItemType Directory -Path $sshDir -Force
+            Set-Content -Path "$sshDir\authorized_keys" -Value $pubkey -NoNewline
+            icacls $sshDir /inheritance:r
+            icacls $sshDir /grant:r "SYSTEM:(OI)(CI)F"
+            icacls $sshDir /grant:r "BUILTIN\Administrators:(OI)(CI)F"
+            icacls $sshDir /grant:r "Builder:(OI)(CI)F"
+            Write-Host "Key auth installed for Builder."
+          } else {
+            Write-Host "SSH_PUBKEY not set; password auth only."
+          }
+
+          # Firewall: SSH on tailnet (same scoping approach as RDP rule)
+          netsh advfirewall firewall delete rule name="SSH-Build-Verify" 2>$null
+          netsh advfirewall firewall add rule name="SSH-Build-Verify" `
+            dir=in action=allow protocol=TCP localport=22
+
+          # Verify listener
+          $t = Test-NetConnection -ComputerName localhost -Port 22
+          if ($t.TcpTestSucceeded) { Write-Host "SSH port 22: OPEN" }
+          else { Write-Warning "SSH port check failed locally." }
+
       # -- 6. Tailscale tunnel --------------------------------------------
       - name: Setup Tailscale tunnel
         if: github.event.inputs.enable_rdp == 'true' && github.event.inputs.tunnel_type == 'tailscale'
