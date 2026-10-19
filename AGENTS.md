@@ -5,10 +5,12 @@ Private repos are cloned at runtime via token, built on cloud VMs, artifacts
 uploaded, source wiped.
 
 - Live repo: `codebox1230/my-builder` (public)
-- Local copy: `C:\Users\prati\public-repo-builder`
+- Local copy: `C:\Users\prati\public-repo-builder` (this IS the git repo)
 - The local copy has MORE than the repo: `infra/` (Terraform + cloud-init) and
   `private-repo-trigger/` (drop-in auto-trigger for private repos) are
   **local only, never pushed**. A fresh clone won't have them.
+- `docs/` holds the human-facing documentation. `README.md` is the entry
+  point; `docs/README.md` indexes the rest.
 
 ## Account rules (violations have caused 403s before)
 
@@ -55,11 +57,17 @@ uploaded, source wiped.
 
 ```
 python tools/validate-workflows.py
+python tools/validate-docs.py
 ```
-YAML-parses every workflow, then syntax-checks each step's script block:
-PowerShell via the .NET parser, bash via `bash -n`. `${{ }}` expressions are
-stubbed before parsing. Must be 29/29 before pushing. Keep files ASCII-only -
-non-ASCII comment art once broke Windows YAML reads.
+`validate-workflows.py` YAML-parses every workflow, then syntax-checks each
+step's script block: PowerShell via the .NET parser, bash via `bash -n`.
+`${{ }}` expressions are stubbed before parsing. Must be 29/29.
+
+`validate-docs.py` checks every markdown file for non-ASCII characters,
+broken internal links, and leaked secret values (passwords, auth keys,
+tailnet IPs). Must report "all clean".
+
+Keep files ASCII-only - non-ASCII comment art once broke Windows YAML reads.
 
 ## Verified gotchas (do not relearn)
 
