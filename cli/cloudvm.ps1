@@ -11,8 +11,10 @@
 #   status                        List recent runs + online tailnet session VMs
 #   up --os windows|mac [--hours N]
 #                                 Start a session VM (waits for tailnet join)
-#   ssh [--os windows|mac] [--run ID] [-- command...]
-#                                 Open interactive SSH or run a remote command
+#   ssh [--os windows|mac] [--run ID] [-c "command"]
+#                                 Interactive SSH, or run one remote command.
+#                                 Use -c "..." -- a bare -- is swallowed by
+#                                 PowerShell itself and never reaches $args.
 #   push <local> <remote> [--os ...]   scp a file TO the session VM
 #   pull <remote> <local> [--os ...]   scp a file FROM the session VM
 #   down [--os windows|mac]       Cancel in-progress session runs

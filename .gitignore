@@ -2,3 +2,8 @@ _work/
 private-code/
 *.env
 
+# Local-only, intentionally never pushed (see AGENTS.md):
+#   infra/                 -> Azure Terraform + cloud-init (self-hosted VM path)
+#   private-repo-trigger/  -> drop-in workflow for YOUR private repos
+infra/
+private-repo-trigger/
