@@ -5,7 +5,7 @@
 ```
 +----------------------------------------------------------------------+
 |  PUBLIC REPO (codebox1230/my-builder)                                 |
-|  Contains ONLY: 3 workflows, CLI, validator, docs                   |
+|  Contains ONLY: 4 workflows, CLI, validator, docs                   |
 |  Contains NO source code of the project being built. Ever.           |
 +---------------+------------------------------------------------------+
                 |  trigger (workflow_dispatch | repository_dispatch)
@@ -57,6 +57,9 @@ GitHub boots an Azure VM per job and deletes it when the job ends.
 | `windows-2022` | 2 cores | 7-8 GB | 14 GB SSD | RDP + OpenSSH Server |
 | `macos-latest` | 3 vCPU (M1) | 7 GB | 14 GB SSD | real Mac hardware |
 
+The Android device matrix runs many short-lived `ubuntu-latest` jobs (one per
+device profile x API level) with hardware acceleration via `/dev/kvm`.
+
 Public repos get **unlimited** minutes. Standard runners cannot be kept alive
 between runs - no snapshot, no resume. Persistence comes from
 `actions/cache` and from artifacts, not from the VM.
@@ -91,6 +94,7 @@ its control plane is a third party.
 | `build-private.yml` | `.github/workflows/` | headless build, artifact upload, cleanup |
 | `rdp-cloud-vm.yml` | `.github/workflows/` | Windows session: RDP + SSH + Tailscale |
 | `mac-screen.yml` | `.github/workflows/` | macOS session: VNC + SSH + Tailscale |
+| `android-device-matrix.yml` | `.github/workflows/` | headless APK matrix on KVM emulators, artifacts only |
 | `cli/cloudvm.ps1` | `cli/` | drive sessions from a terminal or agent |
 | `tools/validate-workflows.py` | `tools/` | pre-push syntax gate |
 | `infra/terraform/main.tf` | `infra/` (local only) | Azure Spot VM provisioning |

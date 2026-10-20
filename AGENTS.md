@@ -30,6 +30,7 @@ uploaded, source wiped.
 | `build-private.yml` | picker, default `windows-2022` | Headless build, no desktop. `repo` input is REQUIRED and defaults to the placeholder `YOUR_USERNAME/YOUR_PRIVATE_REPO` - always pass a real `owner/name`. |
 | `rdp-cloud-vm.yml` | `windows-2022` | Windows session: RDP + SSH over Tailscale/Cloudflare. |
 | `mac-screen.yml` | `macos-latest` | macOS session: Screen Sharing + SSH over Tailscale. |
+| `android-device-matrix.yml` | `ubuntu-latest` matrix | Headless APK matrix across AVD profiles and API levels on KVM emulators. No desktop, no tunnel, reports as artifacts. |
 
 - Session workflows gate on an `authorize` job (actor must be repo owner or
   listed in `ALLOWED_ACTORS`) plus the `protected-cloud` environment.
@@ -61,7 +62,7 @@ python tools/validate-docs.py
 ```
 `validate-workflows.py` YAML-parses every workflow, then syntax-checks each
 step's script block: PowerShell via the .NET parser, bash via `bash -n`.
-`${{ }}` expressions are stubbed before parsing. Must be 29/29.
+`${{ }}` expressions are stubbed before parsing. Must be 38/38.
 
 `validate-docs.py` checks every markdown file for non-ASCII characters,
 broken internal links, and leaked secret values (passwords, auth keys,

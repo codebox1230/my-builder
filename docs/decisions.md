@@ -229,4 +229,5 @@ file - the workflow just vanishes from the Actions tab. A PowerShell parse
 error only surfaces after a 5-minute VM boot. Catching both locally turns a
 5-minute feedback loop into a 2-second one.
 
-**Evidence.** 29/29 blocks pass at time of writing.
+**Evidence.** 38/38 blocks pass at time of writing (29/29 before the Android
+matrix workflow was added).

@@ -37,6 +37,7 @@ A typical session run:
 Windows session, 2 hours          = $0   (public repo minutes)
 Mac session, 1 hour               = $0
 Headless build, 10 minutes        = $0
+Android matrix, 9 emulators       = $0
 Tailscale (personal, 1 node)      = $0
 Firebase Test Lab, 10 virtual/day = $0
 ```

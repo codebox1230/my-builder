@@ -1,17 +1,18 @@
 # Workflow reference
 
-Three workflows. All live in `.github/workflows/`.
+Four workflows. All live in `.github/workflows/`.
 
 ## Quick matrix
 
-| | `build-private.yml` | `rdp-cloud-vm.yml` | `mac-screen.yml` |
-|---|---|---|---|
-| Runner | picker | `windows-2022` | `macos-latest` |
-| Desktop | none | RDP + SSH | VNC + SSH |
-| Gates | none | authorize + environment | authorize + environment |
-| Concurrency | unlimited | one at a time | one at a time (`mac-screen-session`) |
-| Trigger | dispatch, repository_dispatch | dispatch only | dispatch only |
-| Typical use | CI on push | Windows desktop | macOS desktop / Xcode |
+| Workflow | Runner | Access | Gates | Concurrency |
+|---|---|---|---|---|
+| `build-private.yml` | picker, default `windows-2022` | none - artifacts | none | unlimited |
+| `rdp-cloud-vm.yml` | `windows-2022` | RDP + SSH | authorize + environment | one at a time |
+| `mac-screen.yml` | `macos-latest` | VNC + SSH | authorize + environment | one at a time (`mac-screen-session`) |
+| `android-device-matrix.yml` | `ubuntu-latest` matrix | none - artifacts | none | one matrix at a time |
+
+All four are triggered with `workflow_dispatch`. `build-private.yml` also
+accepts `repository_dispatch` from the private-repo trigger.
 
 ---
 
@@ -143,6 +144,60 @@ VNC for humans: `<tailscale-ip>:5900`, username `runner`, password
 
 ---
 
+## android-device-matrix.yml
+
+Headless Android testing. Builds one debug APK, then runs it across a matrix
+of emulated devices (hardware profile x API level) on KVM-accelerated
+Ubuntu runners. No physical devices, no desktop, no tunnel.
+
+### Inputs
+
+| Input | Required | Default | Notes |
+|---|---|---|---|
+| `private_repo` | one of | empty | clone + build source |
+| `private_branch` | no | `main` | branch, tag, or SHA |
+| `apk_url` | one of | empty | prebuilt APK; skips clone and build |
+| `apk_path` | no | empty | APK path in repo; empty = auto-locate |
+| `build_command` | no | empty | empty = `./gradlew assembleDebug` |
+| `api_levels` | no | `29,31,34` | comma-separated |
+| `profiles` | no | `pixel_5,pixel_7,nexus_9` | comma-separated AVD profiles |
+| `target` | no | `google_apis` | system image target |
+| `test_mode` | no | `smoke` | `smoke` or `instrumentation` |
+| `java_version` | no | `17` | JDK for the Gradle build |
+
+One of `private_repo` or `apk_url` must be provided.
+
+### Steps in order
+
+1. `setup` - expand API levels x profiles into a matrix (max 12 jobs)
+2. `build` - clone the private repo, build the APK once, upload it
+3. `emulator` - per matrix cell: boot the AVD on KVM, install, test
+4. upload per-device `logcat` and screenshot artifacts (always)
+
+### Test modes
+
+- `smoke` - launch the launcher activity, run a short random UI pass
+  (`monkey`), fail on `FATAL EXCEPTION`, `ANR`, or a failed launch. Works
+  with any APK, no test code needed.
+- `instrumentation` - install the `androidTest` APK and run
+  `am instrument`; fails on test failures.
+
+### Example
+
+```bash
+gh workflow run android-device-matrix.yml --repo codebox1230/my-builder \
+  -f private_repo=codebox1230/my-private-app \
+  -f api_levels=29,31,34 \
+  -f profiles=pixel_5,pixel_7,nexus_9
+```
+
+Useful profiles: `pixel_5`, `pixel_7`, `pixel_fold`, `pixel_tablet`,
+`nexus_4`, `nexus_9`. The matrix cap is 12 jobs; API levels and profiles
+multiply. See [android-device-testing.md](android-device-testing.md) for the
+Firebase/Play layers that add real hardware.
+
+---
+
 ## private-repo-trigger/trigger-build.yml (local only)
 
 Copy into each private repo at `.github/workflows/trigger-build.yml`.
@@ -187,4 +242,4 @@ python tools/validate-workflows.py
 
 YAML-parses every workflow, then syntax-checks each step's script block -
 PowerShell via the .NET parser, bash via `bash -n`, with `${{ }}` expressions
-stubbed out. Must report 29/29.
+stubbed out. Must report 38/38.

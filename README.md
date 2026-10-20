@@ -21,13 +21,14 @@ against a public repo moves all compute off your laptop: no local CPU spikes,
 no fan noise, no battery drain. The private source is cloned, built, and
 deleted on the VM.
 
-## Three ways in
+## Four ways in
 
 | Need | Workflow | Access |
 |---|---|---|
 | Compile only | `build-private.yml` | none - artifacts download |
 | Windows desktop | `rdp-cloud-vm.yml` | `mstsc` over Tailscale, or SSH for agents |
 | macOS desktop | `mac-screen.yml` | Screen Sharing over Tailscale, or SSH for agents |
+| Android device matrix | `android-device-matrix.yml` | none - APK tested on emulators, reports as artifacts |
 
 ## Agent access
 
@@ -46,7 +47,7 @@ See [docs/remote-access.md](docs/remote-access.md) and
 ## Layout
 
 ```
-.github/workflows/   the three workflows (this is the product)
+.github/workflows/   the four workflows (this is the product)
 cli/cloudvm.ps1      single-file CLI over gh + Tailscale + OpenSSH
 tools/               validator: YAML parse + per-step shell syntax check
 docs/                architecture, data flow, security, runbook, ...
@@ -79,6 +80,6 @@ your Azure subscription and your private repos, not this public one.
 Read [AGENTS.md](AGENTS.md) first. In short:
 
 - `gh` must be authenticated as `codebox1230`
-- run `python tools/validate-workflows.py` before every push (must be 29/29)
+- run `python tools/validate-workflows.py` before every push (must be 38/38)
 - one idea per commit, push straight to `main`
 - keep files ASCII-only

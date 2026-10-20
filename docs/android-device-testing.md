@@ -15,47 +15,27 @@ adds real hardware; Pre-Launch adds real hardware per release for free.
 
 ## Layer 1: emulator matrix on the GitHub runner
 
-`ubuntu-latest` runners expose `/dev/kvm` (verified), so hardware-accelerated
-emulators work. The standard tool is
-`reactivecircus/android-emulator-runner`.
+Implemented as `.github/workflows/android-device-matrix.yml`. `ubuntu-latest`
+runners expose `/dev/kvm` (verified), so hardware-accelerated emulators work.
+The workflow uses `reactivecircus/android-emulator-runner`.
 
-```yaml
-name: Android Matrix
-on:
-  workflow_dispatch:
-    inputs:
-      api_levels: { default: '29,31,34' }
-      profiles:  { default: 'pixel_5,pixel_7,nexus_4' }
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        api: [29, 31, 34]
-        profile: [pixel_5, pixel_7]
-    steps:
-      - uses: actions/checkout@v4
-        with: { path: app }
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '17' }
-      - name: Gradle build
-        working-directory: app
-        run: ./gradlew assembleDebug
-      - name: Emulator test
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: ${{ matrix.api }}
-          profile: ${{ matrix.profile }}
-          script: ./gradlew connectedDebugAndroidTest
-          disable-animations: true
-          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect
+```bash
+gh workflow run android-device-matrix.yml --repo codebox1230/my-builder \
+  -f private_repo=codebox1230/my-private-app \
+  -f api_levels=29,31,34 \
+  -f profiles=pixel_5,pixel_7,nexus_9 \
+  -f test_mode=smoke
 ```
 
-`fail-fast: false` matters: one profile failing should not abort the rest
-of the matrix. `reactivecircus` caches the AVD between runs, which is what
-keeps the matrix affordable in minutes rather than hours.
+The workflow builds the APK once (`./gradlew assembleDebug`, or your
+`build_command`), then runs one matrix job per API level x profile. Pass
+`apk_url` instead of `private_repo` to test a prebuilt APK. `test_mode=smoke`
+launches the app and drives random UI with `monkey`; `instrumentation` runs
+the `androidTest` APK. Per-device `logcat` and screenshots are uploaded even
+when a job fails.
+
+`fail-fast: false` is set: one profile failing does not abort the rest of the
+matrix.
 
 ### Profiles worth covering
 
@@ -71,8 +51,9 @@ keeps the matrix affordable in minutes rather than hours.
 
 ### Building the APK
 
-The runner has the JDK preinstalled (Temurin 17 verified). Android SDK
-components are not, so install what you need:
+The workflow installs Java 17 (`java_version` input) via `setup-java` and the
+Android SDK via `android-actions/setup-android`. Components not in the runner
+image are installed on demand:
 
 ```yaml
 - uses: android-actions/setup-android@v3
@@ -148,9 +129,9 @@ If you outgrow the free tiers:
 ## Practical recipe
 
 ```
-per commit   emulator matrix, 3 API levels x 3 profiles   $0
-per day      Firebase: 5 physical + 5 virtual, with Robo   $0
-per release  Play Pre-Launch Report                       $0
+per commit   emulator matrix workflow, 3 API levels x 3 profiles   $0
+per day      Firebase: 5 physical + 5 virtual, with Robo           $0
+per release  Play Pre-Launch Report                                $0
 ```
 
 Total cost: zero, and coverage across virtual and real hardware.

@@ -23,6 +23,7 @@ WORKFLOWS = [
     ".github/workflows/build-private.yml",
     ".github/workflows/rdp-cloud-vm.yml",
     ".github/workflows/mac-screen.yml",
+    ".github/workflows/android-device-matrix.yml",
     "private-repo-trigger/.github/workflows/trigger-build.yml",
     ".cirun.yml",
 ]
