@@ -78,12 +78,12 @@ gh run view <run-id> --repo codebox1230/my-builder --log-failed
 ```
 
 Then ask: did it fail in checkout (token), build (your code), artifact upload
-(disk space / 14 GB runner limit), or cleanup (rare)?
+(disk space), or cleanup (rare)?
 
 ## Disk pressure on runners
 
-Standard runners have 14 GB. The base image already uses several GB. If a
-build fails with disk exhaustion:
+`ubuntu-24.04` runners have 145 GB with ~86 GB free (measured Oct 2026); the
+base image uses ~60 GB. If a build fails with disk exhaustion:
 
 - prune Docker: `docker system prune -af`
 - clean Gradle: `rm -rf ~/.gradle/caches`

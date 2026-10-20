@@ -121,7 +121,7 @@ ASCII for reading in a terminal, Mermaid for rendering.
   no setup                          terraform + cloud-init
   no persistence                    snapshot, warm cache, custom images
   destroyed every job               you control the lifecycle
-  2 core / 7 GB / 14 GB             4-16 core / 16-64 GB / 128 GB+
+  4 vCPU / 16 GB / 145 GB           4-16 core / 16-64 GB / 128 GB+
 ```
 
 ## 7. Access surface (Windows session)

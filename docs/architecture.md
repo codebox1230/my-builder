@@ -53,9 +53,9 @@ GitHub boots an Azure VM per job and deletes it when the job ends.
 
 | Runner | CPU | RAM | Disk | Notes |
 |---|---|---|---|---|
-| `ubuntu-latest` | 2 cores | 7 GB | 14 GB SSD | exposes `/dev/kvm` |
-| `windows-2022` | 2 cores | 7-8 GB | 14 GB SSD | RDP + OpenSSH Server |
-| `macos-latest` | 3 vCPU (M1) | 7 GB | 14 GB SSD | real Mac hardware |
+| `ubuntu-24.04` | 4 vCPU | 15 GiB | 145 GB (~86 GB free) | measured Oct 2026; exposes `/dev/kvm` |
+| `windows-2022` | 4 vCPU | 16 GB | 145 GB | RDP + OpenSSH Server |
+| `macos-latest` | 3 vCPU (M1) | 7 GB | 14 GB | real Mac hardware |
 
 The Android device matrix runs many short-lived `ubuntu-latest` jobs (one per
 device profile x API level) with hardware acceleration via `/dev/kvm`.

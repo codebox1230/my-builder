@@ -52,8 +52,8 @@ discipline of not leaving session workflows running unattended.
 
 | Limit | Value | Consequence |
 |---|---|---|
-| Runner disk | 14 GB | large dependency trees or Docker images exhaust it |
-| Runner RAM | 7-8 GB | heavy Gradle/Node builds may OOM |
+| Runner disk | 145 GB (~86 GB free measured) | several AVD images or huge artifacts can still exhaust it |
+| Runner RAM | 16 GB (15 GiB usable measured) | heavy Gradle plus emulator in one job can OOM |
 | Artifact retention | 90 days default | old artifacts vanish; download what you need |
 | Session duration | 350 min workflow cap | `session_hours` max 5 |
 | Public repo concurrency | 20 jobs | beyond that, dispatches queue |
