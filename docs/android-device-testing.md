@@ -15,9 +15,10 @@ adds real hardware; Pre-Launch adds real hardware per release for free.
 
 ## Layer 1: emulator matrix on the GitHub runner
 
-Implemented as `.github/workflows/android-device-matrix.yml`. `ubuntu-latest`
+Implemented as `.github/workflows/android-device-matrix.yml`. `ubuntu-24.04`
 runners expose `/dev/kvm` (verified), so hardware-accelerated emulators work.
-The workflow uses `reactivecircus/android-emulator-runner`.
+The workflow uses `reactivecircus/android-emulator-runner` and is pinned to
+24.04 because `ubuntu-latest` is migrating to Ubuntu 26.
 
 ```bash
 gh workflow run android-device-matrix.yml --repo codebox1230/my-builder \
@@ -51,17 +52,14 @@ matrix.
 
 ### Building the APK
 
-The workflow installs Java 17 (`java_version` input) via `setup-java` and the
-Android SDK via `android-actions/setup-android`. Components not in the runner
-image are installed on demand:
+The workflow installs Java (`java_version` input, default 17) via
+`actions/setup-java`. The `ubuntu-latest` image already ships the Android SDK,
+`sdkmanager`, platform-tools, and recent platforms; the workflow accepts
+licenses and lets Gradle download any missing platform or build-tools.
 
-```yaml
-- uses: android-actions/setup-android@v3
-- run: sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-- run: sdkmanager --licenses <<< "y"
-```
-
-Or let Gradle's `gradle/actions/setup-gradle` handle SDK downloads.
+Do not add `android-actions/setup-android@v3`: it installs the long-removed
+`tools` package and fails on current runner images with
+`Failed to find package 'tools'`.
 
 ## Layer 2: Firebase Test Lab (free quota)
 

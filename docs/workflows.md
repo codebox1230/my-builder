@@ -9,7 +9,7 @@ Four workflows. All live in `.github/workflows/`.
 | `build-private.yml` | picker, default `windows-2022` | none - artifacts | none | unlimited |
 | `rdp-cloud-vm.yml` | `windows-2022` | RDP + SSH | authorize + environment | one at a time |
 | `mac-screen.yml` | `macos-latest` | VNC + SSH | authorize + environment | one at a time (`mac-screen-session`) |
-| `android-device-matrix.yml` | `ubuntu-latest` matrix | none - artifacts | none | one matrix at a time |
+| `android-device-matrix.yml` | `ubuntu-24.04` matrix | none - artifacts | none | one matrix at a time |
 
 All four are triggered with `workflow_dispatch`. `build-private.yml` also
 accepts `repository_dispatch` from the private-repo trigger.
@@ -148,7 +148,7 @@ VNC for humans: `<tailscale-ip>:5900`, username `runner`, password
 
 Headless Android testing. Builds one debug APK, then runs it across a matrix
 of emulated devices (hardware profile x API level) on KVM-accelerated
-Ubuntu runners. No physical devices, no desktop, no tunnel.
+Ubuntu 24.04 runners. No physical devices, no desktop, no tunnel.
 
 ### Inputs
 

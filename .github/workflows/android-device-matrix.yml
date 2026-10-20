@@ -75,7 +75,7 @@ concurrency:
 
 jobs:
   setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.m.outputs.matrix }}
     steps:
@@ -101,7 +101,7 @@ jobs:
 
   build:
     needs: setup
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Validate source
@@ -123,7 +123,7 @@ jobs:
 
       - name: Checkout private repo
         if: inputs.apk_url == ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ inputs.private_repo }}
           ref: ${{ inputs.private_branch }}
@@ -132,22 +132,26 @@ jobs:
 
       - name: Setup Java
         if: inputs.apk_url == ''
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: ${{ inputs.java_version }}
 
-      - name: Setup Android SDK
-        if: inputs.apk_url == ''
-        uses: android-actions/setup-android@v3
-
       - name: Accept SDK licenses
         if: inputs.apk_url == ''
-        run: yes | sdkmanager --licenses > /dev/null || true
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKM=$(command -v sdkmanager || true)
+          if [ -z "$SDKM" ]; then
+            SDKM=$(find "$SDK/cmdline-tools" -path "*/bin/sdkmanager" -type f 2>/dev/null | sort -V | tail -n 1)
+          fi
+          if [ -n "$SDKM" ]; then
+            yes | "$SDKM" --licenses > /dev/null || true
+          fi
 
       - name: Gradle cache
         if: inputs.apk_url == ''
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Build debug APK
         if: inputs.apk_url == ''
@@ -200,7 +204,7 @@ jobs:
 
   emulator:
     needs: [setup, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false

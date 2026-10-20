@@ -30,7 +30,7 @@ uploaded, source wiped.
 | `build-private.yml` | picker, default `windows-2022` | Headless build, no desktop. `repo` input is REQUIRED and defaults to the placeholder `YOUR_USERNAME/YOUR_PRIVATE_REPO` - always pass a real `owner/name`. |
 | `rdp-cloud-vm.yml` | `windows-2022` | Windows session: RDP + SSH over Tailscale/Cloudflare. |
 | `mac-screen.yml` | `macos-latest` | macOS session: Screen Sharing + SSH over Tailscale. |
-| `android-device-matrix.yml` | `ubuntu-latest` matrix | Headless APK matrix across AVD profiles and API levels on KVM emulators. No desktop, no tunnel, reports as artifacts. |
+| `android-device-matrix.yml` | `ubuntu-24.04` matrix | Headless APK matrix across AVD profiles and API levels on KVM emulators. No desktop, no tunnel, reports as artifacts. Pinned to 24.04: `ubuntu-latest` is migrating to Ubuntu 26. |
 
 - Session workflows gate on an `authorize` job (actor must be repo owner or
   listed in `ALLOWED_ACTORS`) plus the `protected-cloud` environment.
@@ -91,6 +91,10 @@ Keep files ASCII-only - non-ASCII comment art once broke Windows YAML reads.
   bounded except download/install/`up`.
 - `ubuntu-latest` runners expose `/dev/kvm` (verified) - hardware-accelerated
   Android emulators work there.
+- Do NOT use `android-actions/setup-android@v3` on current runner images: it
+  runs `sdkmanager tools`, which no longer exists, and fails the job. The
+  Android SDK is preinstalled; accept licenses and let Gradle download what
+  it needs.
 
 ## SSH (agents operate the VMs directly from this PC)
 
