@@ -9,8 +9,10 @@
 #
 # Commands:
 #   status                        List recent runs + online tailnet session VMs
-#   up --os windows|mac [--hours N]
+#   up --os windows|mac|android [--hours N]
 #                                 Start a session VM (waits for tailnet join)
+#                                 android adds: --api --target --profile
+#                                 --orientation --repo --branch --build-command
 #   ssh [--os windows|mac] [--run ID] [-c "command"]
 #                                 Interactive SSH, or run one remote command.
 #                                 Use -c "..." -- a bare -- is swallowed by
@@ -55,12 +57,13 @@ function Get-Peers {
 }
 
 function Find-SessionVm([string]$Os, [string]$RunId = "") {
-  $prefix = if ($Os -eq "mac") { "mac-builder-" } else { "build-verify-" }
+  $prefix = if ($Os -eq "mac") { "mac-builder-" } elseif ($Os -eq "android") { "android-builder-" } else { "build-verify-" }
   $peers = Get-Peers | Where-Object { $_.Hostname.StartsWith($prefix) }
   if ($RunId) { $peers = $peers | Where-Object { $_.Hostname -like "*$RunId*" } }
   if (-not $peers) { return $null }
   $vm = $peers | Select-Object -First 1
   $user = if ($Os -eq "mac") { "runner" } else { "Builder" }
+  if ($Os -eq "android") { $user = "runner" }
   return [pscustomobject]@{ Hostname = $vm.Hostname; IP = $vm.IP; User = $user; OS = $Os }
 }
 
@@ -120,7 +123,8 @@ switch ($Command) {
     Write-Output ""
     Write-Output "== Online session VMs (tailnet) =="
     $peers = Get-Peers | Where-Object {
-      $_.Hostname.StartsWith("mac-builder-") -or $_.Hostname.StartsWith("build-verify-")
+      $_.Hostname.StartsWith("mac-builder-") -or $_.Hostname.StartsWith("build-verify-") -or
+      $_.Hostname.StartsWith("android-builder-")
     }
     if ($peers) { $peers | Format-Table Hostname, IP, OS }
     else { Write-Output "(none)" }
@@ -129,10 +133,25 @@ switch ($Command) {
   "up" {
     $os = Get-Flag $rest "os" "windows"
     $hours = Get-Flag $rest "hours" "2"
-    if ($os -eq "mac") {
+    if ($os -eq "android") {
+      $api = Get-Flag $rest "api" "34"
+      $target = Get-Flag $rest "target" "google_apis"
+      $profile = Get-Flag $rest "profile" "pixel_5"
+      $orient = Get-Flag $rest "orientation" "portrait"
+      $repo = Get-Flag $rest "repo" ""
+      $branch = Get-Flag $rest "branch" "main"
+      $bcmd = Get-Flag $rest "build-command" ""
+      $apkUrl = Get-Flag $rest "apk-url" ""
+      $url = gh workflow run android-screen.yml --repo $Repo `
+        -f private_repo=$repo -f private_branch=$branch -f build_command=$bcmd `
+        -f apk_url=$apkUrl -f api_level=$api -f target=$target -f profile=$profile `
+        -f orientation=$orient -f session_hours=$hours
+    }
+    elseif ($os -eq "mac") {
       $url = gh workflow run mac-screen.yml --repo $Repo `
         -f private_repo="" -f session_hours=$hours -f browser_link=false
-    } else {
+    }
+    else {
       $url = gh workflow run rdp-cloud-vm.yml --repo $Repo `
         -f enable_rdp=true -f session_hours=$hours -f tunnel_type=tailscale
     }
@@ -141,7 +160,21 @@ switch ($Command) {
     $vm = Wait-ForPeer $os $runId
     if ($vm) {
       Write-Output "VM online: $($vm.Hostname) at $($vm.IP) (user $($vm.User))"
-    } else {
+      if ($os -eq "android") {
+        Write-Output ""
+        Write-Output "Drive it from the local dashboard:"
+        Write-Output "  python lab/lab.py"
+        Write-Output ""
+        Write-Output "Or over SSH:"
+        Write-Output "  ssh -i $KeyPath $($vm.User)@$($vm.IP) `"adb -s emulator-5554 shell input tap 100 200`""
+        Write-Output ""
+        Write-Output "Or with scrcpy (tunnel + client):"
+        Write-Output "  ssh -N -L 5038:127.0.0.1:5037 -R 27183:127.0.0.1:27183 $($vm.User)@$($vm.IP)"
+        Write-Output "  set ADB_SERVER_SOCKET=tcp:127.0.0.1:5038"
+        Write-Output "  scrcpy"
+      }
+    }
+    else {
       Write-Output "Timed out waiting for tailnet join. Check: gh run view $runId --repo $Repo"
     }
   }
@@ -152,6 +185,7 @@ switch ($Command) {
       # auto-detect: prefer whichever session VM is online
       $vm = Find-SessionVm "windows" $p.run
       if (-not $vm) { $vm = Find-SessionVm "mac" $p.run }
+      if (-not $vm) { $vm = Find-SessionVm "android" $p.run }
       if (-not $vm) { Write-Error "No session VM online."; exit 1 }
     } else {
       $vm = Find-SessionVm $p.os $p.run
@@ -171,6 +205,7 @@ switch ($Command) {
     if (-not $p.os) {
       $vm = Find-SessionVm "windows" $p.run
       if (-not $vm) { $vm = Find-SessionVm "mac" $p.run }
+      if (-not $vm) { $vm = Find-SessionVm "android" $p.run }
       if (-not $vm) { Write-Error "No session VM online."; exit 1 }
     } else {
       $vm = Find-SessionVm $p.os $p.run
@@ -189,7 +224,8 @@ switch ($Command) {
     foreach ($r in $runs) {
       $isMac = $r.workflowName -like "*Mac*"
       $isWin = $r.workflowName -like "*Cloud VM*"
-      $match = ($os -eq "") -or ($os -eq "mac" -and $isMac) -or ($os -eq "windows" -and $isWin)
+      $isAndroid = $r.workflowName -like "*Android Screen*"
+      $match = ($os -eq "") -or ($os -eq "mac" -and $isMac) -or ($os -eq "windows" -and $isWin) -or ($os -eq "android" -and $isAndroid)
       if (-not $match) { continue }
       Write-Output "Cancelling $($r.databaseId) ($($r.workflowName))..."
       gh run cancel $r.databaseId --repo $Repo | Out-Null

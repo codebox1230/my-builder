@@ -5,5 +5,7 @@ private-code/
 # Local-only, intentionally never pushed (see AGENTS.md):
 #   infra/                 -> Azure Terraform + cloud-init (self-hosted VM path)
 #   private-repo-trigger/  -> drop-in workflow for YOUR private repos
+#   lab/                   -> local Android Lab dashboard (runs on your PC)
 infra/
 private-repo-trigger/
+lab/

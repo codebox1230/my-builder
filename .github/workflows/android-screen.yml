@@ -1,0 +1,461 @@
+###############################################################################
+# android-screen.yml
+#
+# Interactive Android device session on a GitHub-hosted Linux VM.
+#
+# One job does the whole loop:
+#   1. clone the private source into the runner (a Linux VM that already has
+#      the Android SDK, a JDK and Gradle cached)
+#   2. build the APK there
+#   3. create + boot a matching AVD (KVM accelerated, headless)
+#   4. install the APK and launch it
+#   5. join the tailnet so the device is reachable (ADB over SSH, scrcpy)
+#   6. hold the session for N hours, then wipe everything
+#
+# The device is NOT published to the internet. ADB stays on the runner's
+# loopback; the agent reaches it with:
+#     ssh -i ~/.ssh/cloud-builder runner@<tailnet-ip> "adb -s emulator-5554 ..."
+# which is what cli/cloudvm.ps1 and lab/lab.py do.
+#
+# Exactly one session at a time: a new dispatch cancels the running one
+# (concurrency cancel-in-progress), GitHub destroys the VM and the ephemeral
+# Tailscale key removes the node from the tailnet. No orphans.
+#
+# Required secrets: TAILSCALE_AUTHKEY, SSH_PUBKEY, PRIVATE_REPO_TOKEN
+# Environment:      protected-cloud
+###############################################################################
+name: Android Screen Session
+
+on:
+  workflow_dispatch:
+    inputs:
+      private_repo:
+        description: "Private repo owner/name to build and install (empty = no app)"
+        required: false
+        default: ""
+      private_branch:
+        description: "Branch, tag, or SHA of the private repo"
+        required: false
+        default: "main"
+      build_command:
+        description: "Custom build command (empty = ./gradlew assembleDebug)"
+        required: false
+        default: ""
+      apk_url:
+        description: "Direct URL to a prebuilt APK (skips clone and build)"
+        required: false
+        default: ""
+      apk_path:
+        description: "APK path inside the repo (empty = auto-locate build output)"
+        required: false
+        default: ""
+      api_level:
+        description: "Android API level of the system image"
+        required: false
+        default: "34"
+      target:
+        description: "System image target (google_apis, google_apis_playstore, default, aosp_atd)"
+        required: false
+        default: "google_apis"
+      arch:
+        description: "System image ABI (x86_64, x86, arm64-v8a)"
+        required: false
+        default: "x86_64"
+      profile:
+        description: "AVD hardware profile (pixel_5, pixel_7, nexus_9, pixel_tablet, ...)"
+        required: false
+        default: "pixel_5"
+      orientation:
+        description: "Initial screen orientation"
+        required: false
+        type: choice
+        options:
+          - portrait
+          - landscape
+        default: portrait
+      session_hours:
+        description: "How long to hold the device (1-5)"
+        required: false
+        default: "2"
+      launch_app:
+        description: "Install and launch the app after boot"
+        required: false
+        type: choice
+        options:
+          - "true"
+          - "false"
+        default: "true"
+
+permissions:
+  contents: read
+
+# One live Android session. A new dispatch cancels the old one.
+concurrency:
+  group: android-screen-session
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================================
+  # GATE: only the repo owner (or ALLOWED_ACTORS) may spend runner minutes
+  # ===========================================================================
+  authorize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    environment: protected-cloud
+    outputs:
+      authorized: ${{ steps.check.outputs.authorized }}
+    steps:
+      - name: Validate actor identity
+        id: check
+        run: |
+          ACTOR="${{ github.actor }}"
+          OWNER="${{ github.repository_owner }}"
+          ALLOWED="${{ secrets.ALLOWED_ACTORS }}"
+
+          echo "Actor:  $ACTOR"
+          echo "Owner:  $OWNER"
+
+          if [[ "$ACTOR" == "$OWNER" ]]; then
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+            echo ">>> Authorized: repo owner."
+            exit 0
+          fi
+
+          if [[ -n "$ALLOWED" ]]; then
+            IFS=',' read -ra ACTORS <<< "$ALLOWED"
+            for allowed in "${ACTORS[@]}"; do
+              allowed=$(echo "$allowed" | xargs)
+              if [[ "$ACTOR" == "$allowed" ]]; then
+                echo "authorized=true" >> "$GITHUB_OUTPUT"
+                echo ">>> Authorized: in allowed list."
+                exit 0
+              fi
+            done
+          fi
+
+          echo "authorized=false" >> "$GITHUB_OUTPUT"
+          echo ">>> DENIED: '$ACTOR' is not authorized to run this workflow."
+          exit 1
+
+  # ===========================================================================
+  # SESSION: build -> boot -> install -> hold -> wipe
+  # ===========================================================================
+  session:
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    outputs:
+      tunnel_address: ${{ steps.tailscale.outputs.ip }}
+      emulator_serial: ${{ steps.boot.outputs.serial }}
+      app_package: ${{ steps.launch.outputs.package }}
+    steps:
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          HOURS="${{ inputs.session_hours }}"
+          if ! [[ "$HOURS" =~ ^[0-9]+$ ]] || [ "$HOURS" -lt 1 ] || [ "$HOURS" -gt 5 ]; then
+            echo "::error::session_hours must be 1-5 (got '$HOURS')"
+            exit 1
+          fi
+          if [ -z "${{ inputs.private_repo }}" ] && [ -z "${{ inputs.apk_url }}" ]; then
+            echo ">>> No app source given: booting a blank device."
+          fi
+
+      - name: Locate SDK tools
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          if [ ! -d "$SDK" ]; then
+            echo "::error::Android SDK not found at $SDK"
+            exit 1
+          fi
+          SDKM=$(command -v sdkmanager || true)
+          if [ -z "$SDKM" ]; then
+            SDKM=$(find "$SDK/cmdline-tools" -path "*/bin/sdkmanager" -type f 2>/dev/null | sort -V | tail -n 1)
+          fi
+          AVDM=$(command -v avdmanager || true)
+          if [ -z "$AVDM" ]; then
+            AVDM=$(find "$SDK/cmdline-tools" -path "*/bin/avdmanager" -type f 2>/dev/null | sort -V | tail -n 1)
+          fi
+          echo "ADB=$SDK/platform-tools/adb" >> "$GITHUB_ENV"
+          echo "SDKM=$SDKM" >> "$GITHUB_ENV"
+          echo "AVDM=$AVDM" >> "$GITHUB_ENV"
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
+          echo "sdk=$SDK"
+          echo "sdkmanager=$SDKM"
+
+      - name: Enable KVM
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing - this runner cannot accelerate the emulator"
+            exit 1
+          fi
+          ls -l /dev/kvm
+
+      - name: Setup Java
+        if: inputs.private_repo != '' && inputs.apk_url == ''
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Gradle cache
+        if: inputs.private_repo != '' && inputs.apk_url == ''
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Accept SDK licenses
+        run: |
+          set -uo pipefail
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          echo "licenses accepted"
+
+      - name: Clone private source
+        if: inputs.private_repo != '' && inputs.apk_url == ''
+        env:
+          PRIVATE_REPO: ${{ inputs.private_repo }}
+          PRIVATE_BRANCH: ${{ inputs.private_branch }}
+          REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$REPO_TOKEN" ]; then
+            echo "::error::PRIVATE_REPO_TOKEN secret is not set"
+            exit 1
+          fi
+          git clone --depth 1 --branch "$PRIVATE_BRANCH" \
+            "https://x-access-token:${REPO_TOKEN}@github.com/${PRIVATE_REPO}.git" src
+          rm -rf src/.git
+          echo "cloned $PRIVATE_REPO @ $PRIVATE_BRANCH"
+
+      - name: Build APK
+        if: inputs.private_repo != '' && inputs.apk_url == ''
+        working-directory: src
+        env:
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BUILD_COMMAND" ]; then
+            echo ">>> custom build: $BUILD_COMMAND"
+            bash -c "$BUILD_COMMAND"
+          elif [ -x ./gradlew ]; then
+            ./gradlew assembleDebug --no-daemon
+          else
+            echo "::error::no gradlew in repo root - pass build_command"
+            exit 1
+          fi
+
+      - name: Collect APK
+        env:
+          APK_URL: ${{ inputs.apk_url }}
+          APK_PATH: ${{ inputs.apk_path }}
+        run: |
+          set -euo pipefail
+          mkdir -p apks
+          if [ -n "$APK_URL" ]; then
+            echo ">>> downloading $APK_URL"
+            curl -fsSL "$APK_URL" -o apks/app.apk
+          elif [ -d src ]; then
+            if [ -n "$APK_PATH" ]; then
+              cp "src/$APK_PATH" apks/app.apk
+            else
+              app=$(find src -path "*/build/outputs/apk/*" -name "*.apk" ! -name "*androidTest*" -print -quit)
+              if [ -z "$app" ]; then
+                echo "::error::no APK under src/**/build/outputs/apk"
+                exit 1
+              fi
+              cp "$app" apks/app.apk
+            fi
+          fi
+          if [ -f apks/app.apk ]; then
+            ls -l apks/app.apk
+          else
+            echo ">>> no APK - booting a blank device"
+          fi
+
+      - name: Setup Tailscale
+        id: tailscale
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TS_AUTHKEY" ]; then
+            echo "::error::TAILSCALE_AUTHKEY secret is not set"
+            exit 1
+          fi
+          curl -fsSL https://pkgs.tailscale.com/stable/tailscale_1.82.0_amd64.tgz -o /tmp/ts.tgz
+          sudo tar -xzf /tmp/ts.tgz -C /tmp
+          HOSTNAME="android-builder-${{ github.run_id }}"
+          if ! sudo /tmp/tailscale/tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOSTNAME" --accept-dns=false; then
+            echo ">>> tun mode failed, retrying in userspace networking mode"
+            sudo /tmp/tailscale/tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOSTNAME" --accept-dns=false --tun=userspace-networking
+          fi
+          ip=""
+          for i in $(seq 1 30); do
+            ip=$(sudo /tmp/tailscale/tailscale ip -4 2>/dev/null | head -n 1 || true)
+            if [ -n "$ip" ]; then
+              break
+            fi
+            sleep 3
+          done
+          if [ -z "$ip" ]; then
+            echo "::error::no tailnet IP after 90 seconds"
+            exit 1
+          fi
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+          echo "Tailscale node $HOSTNAME at $ip"
+
+      - name: Install SSH server and key
+        env:
+          SSH_PUBKEY: ${{ secrets.SSH_PUBKEY }}
+        run: |
+          set -euo pipefail
+          if ! dpkg -s openssh-server > /dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
+          fi
+          if [ -n "$SSH_PUBKEY" ]; then
+            sudo mkdir -p /home/runner/.ssh
+            printf '%s\n' "$SSH_PUBKEY" | sudo tee /home/runner/.ssh/authorized_keys > /dev/null
+            sudo chmod 700 /home/runner/.ssh
+            sudo chmod 600 /home/runner/.ssh/authorized_keys
+            sudo chown -R runner:runner /home/runner/.ssh
+          else
+            echo "::warning::SSH_PUBKEY not set - the device is only reachable from this job"
+          fi
+          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh 2>/dev/null || sudo /usr/sbin/sshd
+          (ss -ltn 2>/dev/null | grep -q ':22 ' && echo "sshd: listening on 22") || echo "::warning::sshd not confirmed listening"
+
+      - name: Create AVD
+        env:
+          API_LEVEL: ${{ inputs.api_level }}
+          TARGET: ${{ inputs.target }}
+          ARCH: ${{ inputs.arch }}
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          set -euo pipefail
+          PKG="system-images;android-${API_LEVEL};${TARGET};${ARCH}"
+          echo ">>> installing $PKG"
+          "$SDKM" "$PKG" "emulator" "platform-tools"
+          echo no | "$AVDM" create avd -n lab -k "$PKG" --device "$PROFILE" --force
+          "$AVDM" list avd
+
+      - name: Boot emulator
+        id: boot
+        run: |
+          set -euo pipefail
+          nohup "$SDK/emulator/emulator" -avd lab \
+            -no-window -no-audio -no-boot-anim -no-snapshot \
+            -gpu swiftshader_indirect -memory 2048 -cores 2 \
+            > /tmp/emulator.log 2>&1 &
+          "$ADB" wait-for-device
+          booted=""
+          for i in $(seq 1 150); do
+            booted=$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+            if [ "$booted" = "1" ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$booted" != "1" ]; then
+            echo "::error::emulator did not boot in 300 seconds"
+            tail -n 40 /tmp/emulator.log || true
+            exit 1
+          fi
+          serial=$("$ADB" devices | awk '$2=="device"{print $1; exit}')
+          echo "serial=$serial" >> "$GITHUB_OUTPUT"
+          echo "booted: $serial"
+          "$ADB" shell getprop ro.build.version.release
+          "$ADB" shell getprop ro.product.cpu.abilist
+          "$ADB" shell wm size
+          "$ADB" shell wm density
+
+      - name: Apply orientation
+        env:
+          ORIENTATION: ${{ inputs.orientation }}
+        run: |
+          set -euo pipefail
+          "$ADB" shell settings put global window_animation_scale 0
+          "$ADB" shell settings put global transition_animation_scale 0
+          "$ADB" shell settings put global animator_duration_scale 0
+          if [ "$ORIENTATION" = "landscape" ]; then
+            "$ADB" shell settings put system accelerometer_rotation 0
+            "$ADB" shell settings put system user_rotation 1
+          else
+            "$ADB" shell settings put system accelerometer_rotation 0
+            "$ADB" shell settings put system user_rotation 0
+          fi
+          sleep 2
+          "$ADB" shell wm size
+
+      - name: Install and launch app
+        id: launch
+        if: inputs.launch_app == 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -f apks/app.apk ]; then
+            echo ">>> no APK to install"
+            exit 0
+          fi
+          "$ADB" install -r -t apks/app.apk
+          AAPT=$(find "$SDK/build-tools" -type f -name aapt 2>/dev/null | sort -V | tail -n 1)
+          if [ -z "$AAPT" ]; then
+            echo "::warning::aapt not found - cannot resolve the package name"
+            exit 0
+          fi
+          pkg=$("$AAPT" dump badging apks/app.apk | awk -F"'" '/^package: name=/{print $2; exit}')
+          echo "package=$pkg" >> "$GITHUB_OUTPUT"
+          echo ">>> installed $pkg"
+          act=$("$ADB" shell cmd package resolve-activity --brief "$pkg" 2>/dev/null | tail -n 1 | tr -d '\r')
+          if [ -n "$act" ] && [ "$act" != "No activity found" ]; then
+            "$ADB" shell am start -n "$act" || true
+          else
+            "$ADB" shell monkey -p "$pkg" -c android.intent.category.LAUNCHER 1 || true
+          fi
+
+      - name: Print connection info
+        run: |
+          echo ""
+          echo "======================================================="
+          echo "  ANDROID SESSION READY"
+          echo "======================================================="
+          echo "  API:        ${{ inputs.api_level }} (${{ inputs.target }})"
+          echo "  Profile:    ${{ inputs.profile }} (${{ inputs.orientation }})"
+          echo "  Host:       runner@${{ steps.tailscale.outputs.ip }}"
+          echo "  Serial:     ${{ steps.boot.outputs.serial }}"
+          echo ""
+          echo "  From your machine:"
+          echo "    ssh -i ~/.ssh/cloud-builder runner@${{ steps.tailscale.outputs.ip }} \"adb -s ${{ steps.boot.outputs.serial }} shell input tap 100 200\""
+          echo "    scrcpy over the tunnel: ssh -N -L 5038:127.0.0.1:5037 -R 27183:127.0.0.1:27183 runner@${{ steps.tailscale.outputs.ip }}"
+          echo "    then: ADB_SERVER_SOCKET=tcp:127.0.0.1:5038 scrcpy"
+          echo ""
+          echo "  Or use the lab UI:  python lab/lab.py"
+          echo "  Session limit: ${{ inputs.session_hours }}h   End early: cancel this run"
+          echo "======================================================="
+
+      - name: Hold session
+        run: |
+          set -uo pipefail
+          max=$(( ${{ inputs.session_hours }} * 60 ))
+          elapsed=0
+          while [ "$elapsed" -lt "$max" ]; do
+            remaining=$(( max - elapsed ))
+            release=$("$ADB" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r' || true)
+            echo "[$(date -u +%H:%M:%S)] session alive - ${remaining}m left - android $release"
+            sleep 60
+            elapsed=$(( elapsed + 60 ))
+          done
+          echo "Session limit reached."
+
+      - name: Cleanup
+        if: always()
+        run: |
+          "$ADB" emu kill 2>/dev/null || true
+          pkill -f qemu-system 2>/dev/null || true
+          rm -rf src apks
+          sudo /tmp/tailscale/tailscale logout 2>/dev/null || true
+          echo "Cleanup done. The VM and its tailnet node are destroyed by GitHub."
