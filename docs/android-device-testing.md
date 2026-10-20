@@ -2,16 +2,18 @@
 
 Testing an APK across many device types without buying any hardware.
 
-## The three layers
+## The layers
 
 | Layer | What it covers | Cost | Latency |
 |---|---|---|---|
 | **Emulator matrix** (your own runner) | API levels, screen sizes, densities, locales, orientations | **$0**, unlimited | minutes |
+| **Interactive session** (your own runner) | one live, drivable device for eyeballing a repro | **$0**, unlimited | instant |
 | **Firebase Test Lab** | real Pixels/Samsungs + virtual fleet, Robo auto-crawl | 10 virtual + 5 physical tests/day free | ~10 min |
 | **Play Pre-Launch Report** | physical device matrix, automatic 5-min crawl | **free, unlimited** with a Play Console upload | hours after upload |
 
-Use them in that order. Emulators catch 90% of issues at zero cost; Firebase
-adds real hardware; Pre-Launch adds real hardware per release for free.
+Use them in that order. Emulators catch 90% of issues at zero cost; the
+interactive session covers what automation cannot assert; Firebase adds real
+hardware; Pre-Launch adds real hardware per release for free.
 
 ## Layer 1: emulator matrix on the GitHub runner
 
@@ -60,6 +62,46 @@ licenses and lets Gradle download any missing platform or build-tools.
 Do not add `android-actions/setup-android@v3`: it installs the long-removed
 `tools` package and fails on current runner images with
 `Failed to find package 'tools'`.
+
+## Layer 1b: interactive device session
+
+The matrix answers "does it pass?". Sometimes you need to *look* at it - a
+reproduction that only happens after three specific taps, a layout that is
+wrong in a way a screenshot shows but an assertion does not.
+`android-screen.yml` gives you a live, drivable device:
+
+```bash
+gh workflow run android-screen.yml --repo codebox1230/my-builder \
+  -f private_repo=codebox1230/my-private-app \
+  -f api_level=34 \
+  -f session_hours=2
+```
+
+It clones and builds the APK, boots a KVM AVD headless, installs and launches
+the app, then holds the device for `session_hours`. The device is never
+published to the internet - ADB stays on the runner's loopback and you reach
+it over SSH:
+
+```bash
+ssh -i ~/.ssh/cloud-builder runner@<tailnet-ip> \
+  "adb -s emulator-5554 shell input tap 500 800"
+```
+
+For a live screen, tunnel ADB and scrcpy out of the runner:
+
+```bash
+ssh -N -L 5038:127.0.0.1:5037 -R 27183:127.0.0.1:27183 \
+  -i ~/.ssh/cloud-builder runner@<tailnet-ip>
+# then, locally:
+ADB_SERVER_SOCKET=tcp:127.0.0.1:5038 scrcpy
+```
+
+Exactly one session exists at a time - a new dispatch cancels the running one.
+The local `lab/` dashboard (not published) drives this session from a browser.
+
+**Status:** built and validated, but not yet proven green - the two runs to
+date were one cancelled and one in progress. Prefer the headless matrix
+workflow until a completion is observed.
 
 ## Layer 2: Firebase Test Lab (free quota)
 

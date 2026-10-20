@@ -21,7 +21,7 @@ against a public repo moves all compute off your laptop: no local CPU spikes,
 no fan noise, no battery drain. The private source is cloned, built, and
 deleted on the VM.
 
-## Four ways in
+## Five ways in
 
 | Need | Workflow | Access |
 |---|---|---|
@@ -29,6 +29,7 @@ deleted on the VM.
 | Windows desktop | `rdp-cloud-vm.yml` | `mstsc` over Tailscale, or SSH for agents |
 | macOS desktop | `mac-screen.yml` | Screen Sharing over Tailscale, or SSH for agents |
 | Android device matrix | `android-device-matrix.yml` | none - APK tested on emulators, reports as artifacts |
+| Android live device | `android-screen.yml` | ADB + scrcpy over SSH; the emulator is never published |
 
 ## Agent access
 
@@ -47,15 +48,17 @@ See [docs/remote-access.md](docs/remote-access.md) and
 ## Layout
 
 ```
-.github/workflows/   the four workflows (this is the product)
+.github/workflows/   the five workflows (this is the product)
 cli/cloudvm.ps1      single-file CLI over gh + Tailscale + OpenSSH
 tools/               validator: YAML parse + per-step shell syntax check
 docs/                architecture, data flow, security, runbook, ...
 infra/               Azure Terraform + cloud-init (LOCAL ONLY, not published)
+lab/                 local Android Lab dashboard (LOCAL ONLY, not published)
 ```
 
-`infra/` and `private-repo-trigger/` are intentionally untracked - they target
-your Azure subscription and your private repos, not this public one.
+`infra/`, `private-repo-trigger/`, and `lab/` are intentionally untracked -
+they target your Azure subscription, your private repos, and your local
+browser, not this public one.
 
 ## Documentation
 
@@ -80,6 +83,6 @@ your Azure subscription and your private repos, not this public one.
 Read [AGENTS.md](AGENTS.md) first. In short:
 
 - `gh` must be authenticated as `codebox1230`
-- run `python tools/validate-workflows.py` before every push (must be 38/38)
+- run `python tools/validate-workflows.py` before every push (must be 56/56)
 - one idea per commit, push straight to `main`
 - keep files ASCII-only

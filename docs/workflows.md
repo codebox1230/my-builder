@@ -1,6 +1,6 @@
 # Workflow reference
 
-Four workflows. All live in `.github/workflows/`.
+Five workflows. All live in `.github/workflows/`.
 
 ## Quick matrix
 
@@ -10,8 +10,9 @@ Four workflows. All live in `.github/workflows/`.
 | `rdp-cloud-vm.yml` | `windows-2022` | RDP + SSH | authorize + environment | one at a time |
 | `mac-screen.yml` | `macos-latest` | VNC + SSH | authorize + environment | one at a time (`mac-screen-session`) |
 | `android-device-matrix.yml` | `ubuntu-24.04` matrix | none - artifacts | none | one matrix at a time |
+| `android-screen.yml` | `ubuntu-24.04` | ADB + scrcpy over SSH | authorize + environment | one at a time (cancels the previous) |
 
-All four are triggered with `workflow_dispatch`. `build-private.yml` also
+All five are triggered with `workflow_dispatch`. `build-private.yml` also
 accepts `repository_dispatch` from the private-repo trigger.
 
 ---
@@ -198,6 +199,81 @@ Firebase/Play layers that add real hardware.
 
 ---
 
+## android-screen.yml
+
+Interactive Android session. One job does the whole loop: clone and build the
+APK, boot a matching KVM AVD headless, install and launch the app, then hold
+the device for N hours so an agent can drive it over SSH.
+
+### Inputs
+
+| Input | Required | Default | Notes |
+|---|---|---|---|
+| `private_repo` | one of | empty | clone + build source |
+| `private_branch` | no | `main` | branch, tag, or SHA |
+| `apk_url` | one of | empty | prebuilt APK; skips clone and build |
+| `apk_path` | no | empty | APK path in repo; empty = auto-locate |
+| `build_command` | no | empty | empty = `./gradlew assembleDebug` |
+| `api_level` | no | `34` | single API level for the device |
+| `target` | no | `google_apis` | `google_apis`, `google_apis_playstore`, `default`, `aosp_atd` |
+| `arch` | no | `x86_64` | `x86_64` or `arm64-v8a` |
+| `profile` | no | `pixel_5` | AVD hardware profile |
+| `orientation` | no | `portrait` | `portrait` or `landscape` |
+| `session_hours` | no | `2` | how long to hold the device |
+| `launch_app` | no | `true` | launch the app after install |
+
+### Steps in order
+
+1. `authorize` - actor must be the repo owner or listed in `ALLOWED_ACTORS`
+2. `session` - clone the private repo and build the APK on the runner
+3. create the AVD and boot it on KVM, headless
+4. install the APK and launch the launcher activity
+5. join the tailnet, publish the SSH access details
+6. hold for `session_hours`, then wipe the runner
+
+### Access
+
+The device is **not** published to the internet. ADB stays bound to the
+runner's loopback; the agent reaches it over SSH:
+
+```bash
+ssh -i ~/.ssh/cloud-builder runner@<tailnet-ip> \
+  "adb -s emulator-5554 shell input tap 500 800"
+```
+
+For a live screen, tunnel ADB and scrcpy out of the runner:
+
+```bash
+ssh -N -L 5038:127.0.0.1:5037 -R 27183:127.0.0.1:27183 \
+  -i ~/.ssh/cloud-builder runner@<tailnet-ip>
+# then, locally:
+ADB_SERVER_SOCKET=tcp:127.0.0.1:5038 scrcpy
+```
+
+### Concurrency
+
+Exactly one session at a time. A new dispatch **cancels** the running one
+(`concurrency` with `cancel-in-progress`). GitHub destroys the VM, and the
+ephemeral Tailscale key removes the node from the tailnet, so no orphan
+device is left behind.
+
+### Status
+
+Built and validated, but **not yet proven green** - the two runs to date
+were one cancelled and one in progress. Treat it as experimental until a
+completion is observed. The headless matrix workflow is the proven path.
+
+### Example
+
+```bash
+gh workflow run android-screen.yml --repo codebox1230/my-builder \
+  -f private_repo=codebox1230/my-private-app \
+  -f api_level=34 \
+  -f session_hours=2
+```
+
+---
+
 ## private-repo-trigger/trigger-build.yml (local only)
 
 Copy into each private repo at `.github/workflows/trigger-build.yml`.
@@ -238,8 +314,12 @@ Always before pushing:
 
 ```bash
 python tools/validate-workflows.py
+python tools/validate-docs.py
 ```
 
-YAML-parses every workflow, then syntax-checks each step's script block -
-PowerShell via the .NET parser, bash via `bash -n`, with `${{ }}` expressions
-stubbed out. Must report 38/38.
+`validate-workflows.py` YAML-parses every workflow, then syntax-checks each
+step's script block - PowerShell via the .NET parser, bash via `bash -n`, with
+`${{ }}` expressions stubbed out. Must report 56/56.
+
+`validate-docs.py` checks every markdown file for non-ASCII characters,
+broken internal links, and leaked secret values. Must report "all clean".

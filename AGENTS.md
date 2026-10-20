@@ -6,8 +6,9 @@ uploaded, source wiped.
 
 - Live repo: `codebox1230/my-builder` (public)
 - Local copy: `C:\Users\prati\public-repo-builder` (this IS the git repo)
-- The local copy has MORE than the repo: `infra/` (Terraform + cloud-init) and
-  `private-repo-trigger/` (drop-in auto-trigger for private repos) are
+- The local copy has MORE than the repo: `infra/` (Terraform + cloud-init),
+  `private-repo-trigger/` (drop-in auto-trigger for private repos), and
+  `lab/` (local Android Lab dashboard) are
   **local only, never pushed**. A fresh clone won't have them.
 - `docs/` holds the human-facing documentation. `README.md` is the entry
   point; `docs/README.md` indexes the rest.
@@ -31,6 +32,7 @@ uploaded, source wiped.
 | `rdp-cloud-vm.yml` | `windows-2022` | Windows session: RDP + SSH over Tailscale/Cloudflare. |
 | `mac-screen.yml` | `macos-latest` | macOS session: Screen Sharing + SSH over Tailscale. |
 | `android-device-matrix.yml` | `ubuntu-24.04` matrix | Headless APK matrix across AVD profiles and API levels on KVM emulators. No desktop, no tunnel, reports as artifacts. Pinned to 24.04: `ubuntu-latest` is migrating to Ubuntu 26. |
+| `android-screen.yml` | `ubuntu-24.04` | Interactive Android session: build APK, boot a KVM AVD, install + launch, then hold for N hours. ADB stays on the runner's loopback; the agent reaches it over SSH (`adb ...` remotely, scrcpy via a tunnel). `concurrency` cancels the previous session, so exactly one exists at a time. |
 
 - Session workflows gate on an `authorize` job (actor must be repo owner or
   listed in `ALLOWED_ACTORS`) plus the `protected-cloud` environment.
@@ -62,7 +64,7 @@ python tools/validate-docs.py
 ```
 `validate-workflows.py` YAML-parses every workflow, then syntax-checks each
 step's script block: PowerShell via the .NET parser, bash via `bash -n`.
-`${{ }}` expressions are stubbed before parsing. Must be 38/38.
+`${{ }}` expressions are stubbed before parsing. Must be 56/56.
 
 `validate-docs.py` checks every markdown file for non-ASCII characters,
 broken internal links, and leaked secret values (passwords, auth keys,

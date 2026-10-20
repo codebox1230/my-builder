@@ -57,8 +57,10 @@ GitHub boots an Azure VM per job and deletes it when the job ends.
 | `windows-2022` | 4 vCPU | 16 GB | 145 GB | RDP + OpenSSH Server |
 | `macos-latest` | 3 vCPU (M1) | 7 GB | 14 GB | real Mac hardware |
 
-The Android device matrix runs many short-lived `ubuntu-latest` jobs (one per
-device profile x API level) with hardware acceleration via `/dev/kvm`.
+The Android device matrix runs many short-lived `ubuntu-24.04` jobs (one per
+device profile x API level) with hardware acceleration via `/dev/kvm`. The
+Android screen session uses one long-lived `ubuntu-24.04` job instead, so the
+emulator can be held for hours and driven remotely.
 
 Public repos get **unlimited** minutes. Standard runners cannot be kept alive
 between runs - no snapshot, no resume. Persistence comes from
@@ -95,11 +97,14 @@ its control plane is a third party.
 | `rdp-cloud-vm.yml` | `.github/workflows/` | Windows session: RDP + SSH + Tailscale |
 | `mac-screen.yml` | `.github/workflows/` | macOS session: VNC + SSH + Tailscale |
 | `android-device-matrix.yml` | `.github/workflows/` | headless APK matrix on KVM emulators, artifacts only |
+| `android-screen.yml` | `.github/workflows/` | interactive Android session: build, boot AVD, install, hold for N hours, reachable over SSH |
 | `cli/cloudvm.ps1` | `cli/` | drive sessions from a terminal or agent |
 | `tools/validate-workflows.py` | `tools/` | pre-push syntax gate |
+| `tools/validate-docs.py` | `tools/` | pre-push docs gate: ASCII, links, secret scan |
 | `infra/terraform/main.tf` | `infra/` (local only) | Azure Spot VM provisioning |
 | `infra/scripts/cloud-init-linux.sh` | `infra/` (local only) | VM boot: toolchain + runner |
 | `private-repo-trigger/trigger-build.yml` | `private-repo-trigger/` (local only) | auto-trigger builds from private repos |
+| `lab/lab.py` | `lab/` (local only) | local Android Lab dashboard driving the session VM |
 
 ## Trust boundaries
 
@@ -120,7 +125,9 @@ its control plane is a third party.
  3. environment       protected-cloud approval (currently no reviewers)
  4. provision         GitHub boots VM, installs toolchain
  5. tunnel            Tailscale joins tailnet (ephemeral node)
- 6. access surface    SSH (always) + RDP (Windows) or VNC (macOS)
+  6. access surface    SSH (always) + RDP (Windows) or VNC (macOS)
+                       Android sessions add ADB on the runner's loopback,
+                       reached over the same SSH tunnel
  7. work              build / debug / verify
  8. cleanup           rm source, logout tailnet, disable remote access
  9. destroy           GitHub deallocates the VM

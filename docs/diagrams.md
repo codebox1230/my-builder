@@ -135,6 +135,34 @@ ASCII for reading in a terminal, Mermaid for rendering.
    zero inbound from the public internet
 ```
 
+## 8. Android screen session
+
+```
+  +--------------------------------------------------------------+
+  |  ubuntu-24.04 runner (one long-lived job)                    |
+  |                                                              |
+  |   clone private repo -> build APK -> create AVD -> boot (KVM) |
+  |   -> install APK -> launch app                               |
+  |                                                              |
+  |   +---------------------------+                             |
+  |   |  emulator (headless)      |                             |
+  |   |  ADB on 127.0.0.1:5037    |  <-- loopback only         |
+  |   +-------------+-------------+                             |
+  |                 |                                           |
+  |           sshd (port 22) ---- keys only                      |
+  +-----------------|--------------------------------------------+
+                    | WireGuard (outbound only)
+      +-------------v--------------+
+      |  YOUR DEVICES (tailnet)   |
+      |   adb -s emulator-5554     |
+      |   scrcpy (tunneled)        |
+      +----------------------------+
+```
+
+The device is never published to the internet. ADB listens on the runner's
+loopback; the agent reaches it by running `adb` *on the far side of SSH*, or
+by forwarding the ADB socket and the scrcpy port over the same tunnel.
+
 ## Mermaid: build graph
 
 ```mermaid
