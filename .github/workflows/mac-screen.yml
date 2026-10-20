@@ -97,7 +97,11 @@ jobs:
   build-and-verify:
     needs: authorize
     if: needs.authorize.outputs.authorized == 'true'
-    runs-on: macos-latest
+    # macos-15 (Sequoia) is pinned deliberately. macos-latest is now macOS 26
+    # on Apple Virtualization Framework, where WindowServer exposes NO display
+    # device (SPDisplaysDataType is empty), so there is no framebuffer and
+    # Screen Sharing serves a black screen with only a cursor.
+    runs-on: macos-15
     timeout-minutes: 350
 
     steps:
@@ -185,16 +189,35 @@ jobs:
       # Apple login checks the SYSTEM account password. Without this step,
       # every login attempt fails with "Authentication failure" because the
       # fresh runner's system password is a random unknown value.
+      #
+      # sysadminctl needs a Secure Token and fails with "Operation is not
+      # permitted without secure token unlock" on a runner whose account was
+      # never unlocked graphically. Fall back to dscl, which writes the
+      # password hash directly and needs no token.
       - name: Set runner account password
         run: |
-          set -euo pipefail
+          set -uo pipefail
           PW="${{ secrets.VNC_PASSWORD }}"
           if [[ -z "$PW" ]]; then
             echo "VNC_PASSWORD secret is not set."
             exit 1
           fi
-          sudo sysadminctl -resetPasswordFor runner -newPassword "$PW"
-          echo "System password set (value masked in logs)."
+          if sudo sysadminctl -resetPasswordFor runner -newPassword "$PW" 2>&1; then
+            echo "System password set via sysadminctl (value masked in logs)."
+          else
+            echo "sysadminctl could not unlock the Secure Token; using dscl."
+            sudo dscl . -passwd /Users/runner "$PW" 2>&1 || {
+              echo "ERROR: could not set the runner account password."
+              exit 1
+            }
+            echo "System password set via dscl (value masked in logs)."
+          fi
+          if sudo dscl . -authonly runner "$PW"; then
+            echo "VERIFIED: runner password authenticates."
+          else
+            echo "ERROR: runner password does not authenticate."
+            exit 1
+          fi
 
       # -- 6. Enable Apple Screen Sharing (VNC, port 5900) --
       # Legacy VNC password auth is REQUIRED: without -setvnclegacy,
@@ -212,10 +235,21 @@ jobs:
           # BOTH auth paths accept the same VNC_PASSWORD:
           # - Apple user login (username runner + password) for native clients
           # - Legacy VNC password (password only) for standard VNC/noVNC
-          # Password is supplied BOTH ways because -setvncpw prompts
-          # interactively on some macOS builds (ignoring -vncpw) and reads
-          # the flag on others. The pipe answers a prompt; the flag covers
-          # non-interactive parsing. One of the two always lands.
+          #
+          # The legacy password is NOT stored by -setvncpw on modern macOS
+          # (verified: the server still offers VNCAuth but rejects every
+          # password). It has to be written into VNCSettings.txt with the
+          # XOR encoding macOS uses. The password is capped at 8 characters,
+          # which is the classic VNC limit.
+          LEGACY_PW="$PW"
+          if [[ ${#LEGACY_PW} -gt 8 ]]; then
+            LEGACY_PW="${LEGACY_PW:0:8}"
+          fi
+          printf '%s\n' "$LEGACY_PW" | sudo perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' \
+            | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
+          sudo chmod 644 /Library/Preferences/com.apple.VNCSettings.txt
+          echo "Legacy VNC password stored in VNCSettings.txt (value masked in logs)."
+
           printf '%s' "$PW" | sudo "$ARD" -activate -configure \
             -allowAccessFor -allUsers \
             -privs -all \
@@ -223,10 +257,54 @@ jobs:
             -configure -clientopts -setvncpw -vncpw "$PW" \
             -restart -agent -menu
           sleep 3
+
+          # Screen Sharing can only capture the display if the daemon holds the
+          # Screen Recording permission. Grant it directly in the TCC database
+          # (SIP is disabled on hosted runners) so the framebuffer is not black.
+          TCCDB="/Library/Application Support/com.apple.TCC/TCC.db"
+          for client in /usr/libexec/ARDAgent /usr/sbin/screensharingd /usr/libexec/sscreensharingd; do
+            sudo sqlite3 "$TCCDB" "insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier_type,indirect_object_identifier,flags,last_modified) values ('kTCCServiceScreenCapture','$client',0,2,2,1,0,NULL,0,datetime('now'));" 2>/dev/null || true
+          done
+          sudo killall screensharingd 2>/dev/null || true
+          sleep 2
+
+          # Keep the display awake; a sleeping display renders as black.
+          sudo pmset -a displaysleep 0 sleep 0 disksleep 0 2>/dev/null || true
+          sudo caffeinate -dimsu -t 7200 > /dev/null 2>&1 &
+          caffeinate -u -t 3 > /dev/null 2>&1 || true
+
           if nc -z localhost 5900 2>/dev/null; then
             echo "Screen Sharing is LISTENING on port 5900 (legacy VNC auth on)."
           else
             echo "WARNING: port 5900 check inconclusive, continuing anyway."
+          fi
+
+      # -- 6a. Display self-check --
+      # A macOS runner with no display device gives a black VNC screen even
+      # though auth and the port are fine. Report the state loudly instead of
+      # letting the user discover a black window.
+      - name: Display self-check
+        run: |
+          set -uo pipefail
+          echo "=== display devices ==="
+          system_profiler SPDisplaysDataType 2>/dev/null | head -20
+          DISP=$(system_profiler SPDisplaysDataType 2>/dev/null | grep -c "Resolution" || true)
+          if [[ "$DISP" -eq 0 ]]; then
+            echo "::warning title=No Display::No display device is attached. Screen Sharing will show a black screen on this runner image."
+          else
+            echo "Display device present."
+          fi
+          echo "=== console user ==="
+          stat -f%Su /dev/console 2>/dev/null || true
+          echo "=== capture test (console session) ==="
+          CU=$(stat -f%Su /dev/console 2>/dev/null)
+          CU_UID=$(id -u "$CU" 2>/dev/null || echo 0)
+          rm -f /tmp/display-check.png
+          sudo launchctl asuser "$CU_UID" /usr/sbin/screencapture -x /tmp/display-check.png 2>&1 | head -2 || true
+          if [[ -f /tmp/display-check.png ]]; then
+            echo "Capture OK: $(stat -f%z /tmp/display-check.png) bytes."
+          else
+            echo "::warning title=Capture Failed::screencapture could not create an image; the display may not be capturable."
           fi
 
       # -- 6b. Enable Remote Login (SSH agent + SCP access) --
