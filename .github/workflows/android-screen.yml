@@ -242,7 +242,7 @@ jobs:
           fi
           ip=""
           for i in $(seq 1 30); do
-            ip=$(sudo /tmp/tailscale/tailscale ip -4 2>/dev/null | head -n 1 || true)
+            ip=$(sudo tailscale ip -4 2>/dev/null | head -n 1 || true)
             if [ -n "$ip" ]; then
               break
             fi
@@ -266,15 +266,21 @@ jobs:
           fi
           if [ -n "$SSH_PUBKEY" ]; then
             sudo mkdir -p /home/runner/.ssh
-            printf '%s\n' "$SSH_PUBKEY" | sudo tee /home/runner/.ssh/authorized_keys > /dev/null
+            printf '%s' "$SSH_PUBKEY" | tr -d '\r' | sed -e '/^[[:space:]]*$/d' \
+              | sudo tee /home/runner/.ssh/authorized_keys > /dev/null
             sudo chmod 700 /home/runner/.ssh
             sudo chmod 600 /home/runner/.ssh/authorized_keys
             sudo chown -R runner:runner /home/runner/.ssh
+            sudo chmod 755 /home/runner
+            echo "installed key fingerprint:"
+            ssh-keygen -l -f /home/runner/.ssh/authorized_keys \
+              || { echo "::error::authorized_keys is not a valid key"; exit 1; }
+            sudo sshd -T 2>/dev/null | grep -iE 'authorizedkeysfile|pubkeyauthentication|strictmodes' || true
           else
             echo "::warning::SSH_PUBKEY not set - the device is only reachable from this job"
           fi
-          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
           sudo systemctl restart ssh 2>/dev/null || sudo /usr/sbin/sshd
+          sleep 2
           (ss -ltn 2>/dev/null | grep -q ':22 ' && echo "sshd: listening on 22") || echo "::warning::sshd not confirmed listening"
 
       - name: Setup Java
