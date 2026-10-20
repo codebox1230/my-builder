@@ -138,12 +138,12 @@ switch ($Command) {
       $target = Get-Flag $rest "target" "google_apis"
       $profile = Get-Flag $rest "profile" "pixel_5"
       $orient = Get-Flag $rest "orientation" "portrait"
-      $repo = Get-Flag $rest "repo" ""
+      $srcRepo = Get-Flag $rest "repo" ""
       $branch = Get-Flag $rest "branch" "main"
       $bcmd = Get-Flag $rest "build-command" ""
       $apkUrl = Get-Flag $rest "apk-url" ""
       $url = gh workflow run android-screen.yml --repo $Repo `
-        -f private_repo=$repo -f private_branch=$branch -f build_command=$bcmd `
+        -f private_repo=$srcRepo -f private_branch=$branch -f build_command=$bcmd `
         -f apk_url=$apkUrl -f api_level=$api -f target=$target -f profile=$profile `
         -f orientation=$orient -f session_hours=$hours
     }
@@ -234,13 +234,13 @@ switch ($Command) {
   }
 
   "build" {
-    $repo = Get-Flag $rest "repo" ""
-    if (-not $repo) { Write-Error "Usage: cloudvm build --repo owner/name [--branch B] [--runner R]"; exit 1 }
+    $srcRepo = Get-Flag $rest "repo" ""
+    if (-not $srcRepo) { Write-Error "Usage: cloudvm build --repo owner/name [--branch B] [--runner R]"; exit 1 }
     $branch = Get-Flag $rest "branch" "main"
     $runner = Get-Flag $rest "runner" "ubuntu-latest"
     $bcmd = Get-Flag $rest "build-command" ""
     $apath = Get-Flag $rest "artifact-path" ""
-    $url = gh workflow run build-private.yml --repo $Repo -f repo=$repo `
+    $url = gh workflow run build-private.yml --repo $Repo -f repo=$srcRepo `
       -f branch=$branch -f runner=$runner -f build_command=$bcmd -f artifact_path=$apath
     $runId = ($url | Select-String "\d+$").Matches.Value
     Write-Output "Build run $runId started. Waiting..."

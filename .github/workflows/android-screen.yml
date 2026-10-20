@@ -207,12 +207,38 @@ jobs:
             echo "::error::TAILSCALE_AUTHKEY secret is not set"
             exit 1
           fi
+          sudo rm -rf /tmp/ts
+          mkdir -p /tmp/ts
           curl -fsSL https://pkgs.tailscale.com/stable/tailscale_1.82.0_amd64.tgz -o /tmp/ts.tgz
-          sudo tar -xzf /tmp/ts.tgz -C /tmp
+          sudo tar -xzf /tmp/ts.tgz -C /tmp/ts
+          TSBIN=$(sudo find /tmp/ts -type f -name tailscale -print -quit)
+          TSDAEMON=$(sudo find /tmp/ts -type f -name tailscaled -print -quit)
+          if [ -z "$TSBIN" ]; then
+            echo "::error::no tailscale binary in the tarball"
+            sudo find /tmp/ts | head -n 20
+            exit 1
+          fi
+          sudo install -m 0755 "$TSBIN" /usr/local/bin/tailscale
+          if [ -n "$TSDAEMON" ]; then
+            sudo install -m 0755 "$TSDAEMON" /usr/local/bin/tailscaled
+          fi
+          sudo mkdir -p /var/lib/tailscale
+          # The tarball ships no systemd unit - start the daemon ourselves.
+          sudo nohup tailscaled --state=/var/lib/tailscale/tailscaled.state \
+            > /tmp/tailscaled.log 2>&1 &
+          sleep 6
+          sudo tailscale version || true
           HOSTNAME="android-builder-${{ github.run_id }}"
-          if ! sudo /tmp/tailscale/tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOSTNAME" --accept-dns=false; then
-            echo ">>> tun mode failed, retrying in userspace networking mode"
-            sudo /tmp/tailscale/tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOSTNAME" --accept-dns=false --tun=userspace-networking
+          if ! sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOSTNAME" --accept-dns=false; then
+            echo ">>> default tun mode failed, retrying in userspace networking mode"
+            sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOSTNAME" --accept-dns=false --tun=userspace-networking
+          fi
+          sudo tailscale status > /tmp/ts-status.txt 2>&1 || true
+          head -n 3 /tmp/ts-status.txt || true
+          if ! grep -q . /tmp/ts-status.txt; then
+            echo "::error::tailscale did not come up"
+            sudo tail -n 20 /tmp/tailscaled.log || true
+            exit 1
           fi
           ip=""
           for i in $(seq 1 30); do
