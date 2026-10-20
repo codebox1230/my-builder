@@ -231,8 +231,78 @@ jobs:
           fi
           ls -l /dev/kvm
 
+      - name: Write emulator test script
+        env:
+          TAG: ${{ matrix.profile }}-api${{ matrix.api }}
+          TEST_MODE: ${{ inputs.test_mode }}
+        run: |
+          cat > "$RUNNER_TEMP/emu-test.sh" <<'SH'
+          set -euo pipefail
+          LOG="logcat-${TAG}.txt"
+          trap 'adb logcat -d > "$LOG" 2>/dev/null || true' EXIT
+
+          APP_APK=$(find apks -name "app.apk" | head -n 1)
+          TEST_APK=$(find apks -name "*androidTest*.apk" | head -n 1 || true)
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          AAPT=$(command -v aapt 2>/dev/null || true)
+          if [ -z "$AAPT" ]; then
+            AAPT=$(find "$SDK/build-tools" -type f -name aapt 2>/dev/null | sort -V | tail -n 1)
+          fi
+          if [ -z "$AAPT" ]; then
+            echo "::error::aapt not found; cannot read APK package name"
+            exit 1
+          fi
+
+          PKG=$("$AAPT" dump badging "$APP_APK" | awk -F"'" '/^package: name=/{print $2; exit}')
+          if [ -z "$PKG" ]; then
+            echo "::error::Could not read package name from $APP_APK"
+            exit 1
+          fi
+          echo "Package: $PKG"
+
+          adb install -r -t "$APP_APK"
+          if [ "$TEST_MODE" = "instrumentation" ]; then
+            if [ -z "$TEST_APK" ]; then
+              echo "::error::instrumentation mode needs an androidTest APK; build one with assembleDebugAndroidTest or switch to smoke"
+              exit 1
+            fi
+            adb install -r -t "$TEST_APK"
+            RUNNER=$(adb shell pm list instrumentation | sed -n 's/.*instrumentation:\([^ ]*\).*/\1/p' | head -n 1)
+            if [ -z "$RUNNER" ]; then
+              echo "::error::No instrumentation runner found in test APK"
+              exit 1
+            fi
+            echo "Instrumentation runner: $RUNNER"
+            adb shell am instrument -w -r "$RUNNER"
+          else
+            LAUNCH=$(adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 2>&1 || true)
+            echo "$LAUNCH"
+            if echo "$LAUNCH" | grep -qE "No activities found|aborted"; then
+              echo "::error::App failed to launch (no launcher activity?)"
+              exit 1
+            fi
+            adb shell monkey -p "$PKG" --pct-syskeys 0 --throttle 300 -v 300 > /dev/null 2>&1 || true
+            sleep 5
+          fi
+
+          adb logcat -d > "$LOG" || true
+          if grep -A5 "FATAL EXCEPTION" "$LOG" | grep -q "Process: $PKG"; then
+            echo "::error::Crash detected in $PKG"
+            exit 1
+          fi
+          if grep -q "ANR in $PKG" "$LOG"; then
+            echo "::error::ANR detected in $PKG"
+            exit 1
+          fi
+          adb exec-out screencap -p > "screenshot-${TAG}.png" || true
+          SH
+          chmod +x "$RUNNER_TEMP/emu-test.sh"
+
       - name: Run APK on emulator
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          TAG: ${{ matrix.profile }}-api${{ matrix.api }}
+          TEST_MODE: ${{ inputs.test_mode }}
         with:
           api-level: ${{ matrix.api }}
           target: ${{ inputs.target }}
@@ -241,58 +311,7 @@ jobs:
           emulator-boot-timeout: 600
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none
-          script: |
-            set -eu
-            TAG="${{ matrix.profile }}-api${{ matrix.api }}"
-            LOG="logcat-${TAG}.txt"
-            trap 'adb logcat -d > "$LOG" 2>/dev/null || true' EXIT
-            APP_APK=$(find apks -name "app.apk" | head -n 1)
-            TEST_APK=$(find apks -name "*androidTest*.apk" | head -n 1 || true)
-            SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-            AAPT=$(command -v aapt 2>/dev/null || true)
-            if [ -z "$AAPT" ]; then
-              AAPT=$(find "$SDK/build-tools" -type f -name aapt 2>/dev/null | sort -V | tail -n 1)
-            fi
-            if [ -z "$AAPT" ]; then
-              echo "::error::aapt not found; cannot read APK package name"
-              exit 1
-            fi
-            PKG=$("$AAPT" dump badging "$APP_APK" | awk -F"'" '/^package: name=/{print $2; exit}')
-            if [ -z "$PKG" ]; then
-              echo "::error::Could not read package name from $APP_APK"
-              exit 1
-            fi
-            echo "Package: $PKG"
-            adb install -r -t "$APP_APK"
-            if [ "${{ inputs.test_mode }}" = "instrumentation" ]; then
-              if [ -z "$TEST_APK" ]; then
-                echo "::error::instrumentation mode needs an androidTest APK; build one with assembleDebugAndroidTest or switch to smoke"
-                exit 1
-              fi
-              adb install -r -t "$TEST_APK"
-              RUNNER=$(adb shell pm list instrumentation | sed -n 's/.*instrumentation:\([^ ]*\).*/\1/p' | head -n 1)
-              if [ -z "$RUNNER" ]; then
-                echo "::error::No instrumentation runner found in test APK"
-                exit 1
-              fi
-              echo "Instrumentation runner: $RUNNER"
-              adb shell am instrument -w -r "$RUNNER"
-            else
-              LAUNCH=$(adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 2>&1 || true)
-              echo "$LAUNCH"
-              if echo "$LAUNCH" | grep -qE "No activities found|aborted"; then
-                echo "::error::App failed to launch (no launcher activity?)"
-                exit 1
-              fi
-              adb shell monkey -p "$PKG" --pct-syskeys 0 --throttle 300 -v 300 > /dev/null 2>&1 || true
-              sleep 5
-            fi
-            adb logcat -d > "$LOG" || true
-            if grep -E "FATAL EXCEPTION|ANR in |beginning of crash" "$LOG"; then
-              echo "::error::Crash or ANR detected in logcat"
-              exit 1
-            fi
-            adb exec-out screencap -p > "screenshot-${TAG}.png" || true
+          script: bash "$RUNNER_TEMP/emu-test.sh"
 
       - name: Upload results
         if: always()
