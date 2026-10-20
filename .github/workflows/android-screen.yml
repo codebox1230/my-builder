@@ -197,6 +197,60 @@ jobs:
           fi
           ls -l /dev/kvm
 
+      - name: Setup Tailscale
+        id: tailscale
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TS_AUTHKEY" ]; then
+            echo "::error::TAILSCALE_AUTHKEY secret is not set"
+            exit 1
+          fi
+          curl -fsSL https://pkgs.tailscale.com/stable/tailscale_1.82.0_amd64.tgz -o /tmp/ts.tgz
+          sudo tar -xzf /tmp/ts.tgz -C /tmp
+          HOSTNAME="android-builder-${{ github.run_id }}"
+          if ! sudo /tmp/tailscale/tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOSTNAME" --accept-dns=false; then
+            echo ">>> tun mode failed, retrying in userspace networking mode"
+            sudo /tmp/tailscale/tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOSTNAME" --accept-dns=false --tun=userspace-networking
+          fi
+          ip=""
+          for i in $(seq 1 30); do
+            ip=$(sudo /tmp/tailscale/tailscale ip -4 2>/dev/null | head -n 1 || true)
+            if [ -n "$ip" ]; then
+              break
+            fi
+            sleep 3
+          done
+          if [ -z "$ip" ]; then
+            echo "::error::no tailnet IP after 90 seconds"
+            exit 1
+          fi
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+          echo "Tailscale node $HOSTNAME at $ip"
+
+      - name: Install SSH server and key
+        env:
+          SSH_PUBKEY: ${{ secrets.SSH_PUBKEY }}
+        run: |
+          set -euo pipefail
+          if ! dpkg -s openssh-server > /dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
+          fi
+          if [ -n "$SSH_PUBKEY" ]; then
+            sudo mkdir -p /home/runner/.ssh
+            printf '%s\n' "$SSH_PUBKEY" | sudo tee /home/runner/.ssh/authorized_keys > /dev/null
+            sudo chmod 700 /home/runner/.ssh
+            sudo chmod 600 /home/runner/.ssh/authorized_keys
+            sudo chown -R runner:runner /home/runner/.ssh
+          else
+            echo "::warning::SSH_PUBKEY not set - the device is only reachable from this job"
+          fi
+          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh 2>/dev/null || sudo /usr/sbin/sshd
+          (ss -ltn 2>/dev/null | grep -q ':22 ' && echo "sshd: listening on 22") || echo "::warning::sshd not confirmed listening"
+
       - name: Setup Java
         if: inputs.private_repo != '' && inputs.apk_url == ''
         uses: actions/setup-java@v5
@@ -275,60 +329,6 @@ jobs:
           else
             echo ">>> no APK - booting a blank device"
           fi
-
-      - name: Setup Tailscale
-        id: tailscale
-        env:
-          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "$TS_AUTHKEY" ]; then
-            echo "::error::TAILSCALE_AUTHKEY secret is not set"
-            exit 1
-          fi
-          curl -fsSL https://pkgs.tailscale.com/stable/tailscale_1.82.0_amd64.tgz -o /tmp/ts.tgz
-          sudo tar -xzf /tmp/ts.tgz -C /tmp
-          HOSTNAME="android-builder-${{ github.run_id }}"
-          if ! sudo /tmp/tailscale/tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOSTNAME" --accept-dns=false; then
-            echo ">>> tun mode failed, retrying in userspace networking mode"
-            sudo /tmp/tailscale/tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOSTNAME" --accept-dns=false --tun=userspace-networking
-          fi
-          ip=""
-          for i in $(seq 1 30); do
-            ip=$(sudo /tmp/tailscale/tailscale ip -4 2>/dev/null | head -n 1 || true)
-            if [ -n "$ip" ]; then
-              break
-            fi
-            sleep 3
-          done
-          if [ -z "$ip" ]; then
-            echo "::error::no tailnet IP after 90 seconds"
-            exit 1
-          fi
-          echo "ip=$ip" >> "$GITHUB_OUTPUT"
-          echo "Tailscale node $HOSTNAME at $ip"
-
-      - name: Install SSH server and key
-        env:
-          SSH_PUBKEY: ${{ secrets.SSH_PUBKEY }}
-        run: |
-          set -euo pipefail
-          if ! dpkg -s openssh-server > /dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
-          fi
-          if [ -n "$SSH_PUBKEY" ]; then
-            sudo mkdir -p /home/runner/.ssh
-            printf '%s\n' "$SSH_PUBKEY" | sudo tee /home/runner/.ssh/authorized_keys > /dev/null
-            sudo chmod 700 /home/runner/.ssh
-            sudo chmod 600 /home/runner/.ssh/authorized_keys
-            sudo chown -R runner:runner /home/runner/.ssh
-          else
-            echo "::warning::SSH_PUBKEY not set - the device is only reachable from this job"
-          fi
-          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-          sudo systemctl restart ssh 2>/dev/null || sudo /usr/sbin/sshd
-          (ss -ltn 2>/dev/null | grep -q ':22 ' && echo "sshd: listening on 22") || echo "::warning::sshd not confirmed listening"
 
       - name: Create AVD
         env:
