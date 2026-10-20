@@ -185,16 +185,18 @@ jobs:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
           hostname: mac-builder-${{ github.run_id }}
 
-      # -- 5. Set runner account password (REQUIRED) --
-      # Apple login checks the SYSTEM account password. Without this step,
-      # every login attempt fails with "Authentication failure" because the
-      # fresh runner's system password is a random unknown value.
+      # -- 5. Set up the VNC login account (REQUIRED) --
+      # Apple login checks the SYSTEM account password. Without this, every
+      # login attempt fails with "Authentication failure" because the fresh
+      # runner's system password is a random unknown value.
       #
-      # sysadminctl needs a Secure Token and fails with "Operation is not
-      # permitted without secure token unlock" on a runner whose account was
-      # never unlocked graphically. Fall back to dscl, which writes the
-      # password hash directly and needs no token.
-      - name: Set runner account password
+      # The built-in 'runner' account CANNOT be re-keyed on a hosted image:
+      # sysadminctl needs a Secure Token and prints "Operation is not
+      # permitted without secure token unlock" while still exiting 0, and
+      # dscl -passwd demands the old password. So the password is set on a
+      # dedicated account instead, which sysadminctl -addUser creates
+      # cleanly and which ARD then logs in as the console user.
+      - name: Set up VNC login account
         run: |
           set -uo pipefail
           PW="${{ secrets.VNC_PASSWORD }}"
@@ -202,21 +204,32 @@ jobs:
             echo "VNC_PASSWORD secret is not set."
             exit 1
           fi
-          if sudo sysadminctl -resetPasswordFor runner -newPassword "$PW" 2>&1; then
-            echo "System password set via sysadminctl (value masked in logs)."
+          VNC_USER="vncuser"
+          echo "User: $VNC_USER"
+
+          # Try the console account first; it is the nicest experience because
+          # the VNC session then lands on the already-logged-in desktop.
+          if sudo sysadminctl -resetPasswordFor runner -newPassword "$PW" 2>&1 | tee /tmp/sysadmin.out | grep -q "Operation is not permitted"; then
+            echo "sysadminctl cannot unlock the Secure Token for 'runner' (expected on hosted images)."
           else
-            echo "sysadminctl could not unlock the Secure Token; using dscl."
-            sudo dscl . -passwd /Users/runner "$PW" 2>&1 || {
-              echo "ERROR: could not set the runner account password."
-              exit 1
-            }
-            echo "System password set via dscl (value masked in logs)."
+            echo "Console account password reset attempted."
           fi
-          if sudo dscl . -authonly runner "$PW"; then
-            echo "VERIFIED: runner password authenticates."
+          if sudo dscl . -authonly runner "$PW" 2>/dev/null; then
+            echo "Console account 'runner' accepts the password."
+            echo "VNC_USER=runner" >> "$GITHUB_ENV"
           else
-            echo "ERROR: runner password does not authenticate."
-            exit 1
+            echo "Creating dedicated VNC account '$VNC_USER'."
+            sudo sysadminctl -addUser "$VNC_USER" -fullName "VNC User" -password "$PW" -admin 2>&1 | tail -3
+            sudo dseditgroup -o edit -a "$VNC_USER" -t user com.apple.access_screensharing 2>/dev/null || true
+            sudo dseditgroup -o edit -a "$VNC_USER" -t user admin 2>/dev/null || true
+            sudo dscl . -passwd "/Users/$VNC_USER" "$PW" 2>/dev/null || true
+            if sudo dscl . -authonly "$VNC_USER" "$PW" 2>/dev/null; then
+              echo "Account '$VNC_USER' accepts the password."
+              echo "VNC_USER=$VNC_USER" >> "$GITHUB_ENV"
+            else
+              echo "::warning title=VNC Account::Neither the console account nor a new account could be password-authenticated. Legacy VNC password auth may still work."
+              echo "VNC_USER=runner" >> "$GITHUB_ENV"
+            fi
           fi
 
       # -- 6. Enable Apple Screen Sharing (VNC, port 5900) --
@@ -346,6 +359,76 @@ jobs:
           s.close()
           EOF
 
+      # -- 6d. Framebuffer probe --
+      # Connects like a real client and asks for a full-screen update. A
+      # server that answers with zero rectangles has no framebuffer to give,
+      # which is what a black screen looks like from the user's side.
+      - name: Probe framebuffer
+        run: |
+          set -uo pipefail
+          PW="${{ secrets.VNC_PASSWORD }}"
+          LEGACY_PW="$PW"
+          if [[ ${#LEGACY_PW} -gt 8 ]]; then LEGACY_PW="${LEGACY_PW:0:8}"; fi
+          python3 - "$LEGACY_PW" <<'EOF' || echo "::warning title=Framebuffer Probe::probe did not complete."
+          import socket, struct, sys, time
+
+          password = sys.argv[1].encode()[:8].ljust(8, b"\x00")
+          key = bytes(int(f"{b:08b}"[::-1], 2) for b in password)
+
+          def recvall(s, n):
+              buf = b""
+              while len(buf) < n:
+                  c = s.recv(n - len(buf))
+                  if not c:
+                      raise EOFError
+                  buf += c
+              return buf
+
+          s = socket.create_connection(("127.0.0.1", 5900), timeout=15)
+          s.recv(12)
+          s.sendall(b"RFB 003.008\n")
+          n = recvall(s, 1)[0]
+          types = list(recvall(s, n))
+          print("offered:", types)
+          if 2 not in types:
+              print("classic VNC auth not offered; skipping probe")
+              sys.exit(0)
+          s.sendall(bytes([2]))
+          challenge = recvall(s, 16)
+          try:
+              from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+              enc = Cipher(algorithms.TripleDES(key * 3), modes.ECB()).encryptor()
+              s.sendall(enc.update(challenge) + enc.finalize())
+          except Exception as e:
+              print("DES unavailable:", e)
+              sys.exit(0)
+          result = struct.unpack(">I", recvall(s, 4))[0]
+          print("legacy auth result:", result, "(0 = OK)")
+          if result != 0:
+              print("legacy password rejected")
+              sys.exit(0)
+          s.sendall(bytes([1]))
+          w, h = struct.unpack(">HH", recvall(s, 4))
+          recvall(s, 16)
+          nl = struct.unpack(">I", recvall(s, 4))[0]
+          recvall(s, nl)
+          print("framebuffer:", w, "x", h)
+          s.sendall(struct.pack(">BBH", 2, 0, 1) + struct.pack(">i", 0))
+          s.sendall(struct.pack(">BBHHHH", 3, 0, 0, 0, w, h))
+          s.settimeout(20)
+          try:
+              head = recvall(s, 4)
+              if head[0] == 0:
+                  nrects = struct.unpack(">H", head[2:4])[0]
+                  print("rectangles returned:", nrects)
+                  if nrects == 0:
+                      print("::warning title=Black Screen Risk::The server returned no framebuffer rectangles; the display has nothing to render.")
+          except Exception as e:
+              print("no framebuffer update received:", e)
+              print("::warning title=Black Screen Risk::The server sent no framebuffer update; the display may be empty.")
+          s.close()
+          EOF
+
       # -- 6c. Browser access: noVNC + websockify + Tailscale Funnel --
       # Serves the Mac screen as a web page; Funnel publishes a public
       # https://...ts.net link you open in Chrome. No VNC client needed.
@@ -419,7 +502,7 @@ jobs:
           echo ""
           echo "  Address:   $TS_IP"
           echo "  Port:      5900 (VNC)"
-          echo "  Username:  runner"
+          echo "  Username:  ${VNC_USER:-runner}"
           echo "  Password:  (your VNC_PASSWORD secret)"
           echo ""
           echo "  From WINDOWS: RealVNC Viewer / TightVNC / TigerVNC"
