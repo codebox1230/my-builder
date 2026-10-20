@@ -242,7 +242,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none
           script: |
-            set -euo pipefail
+            set -eu
             TAG="${{ matrix.profile }}-api${{ matrix.api }}"
             LOG="logcat-${TAG}.txt"
             trap 'adb logcat -d > "$LOG" 2>/dev/null || true' EXIT

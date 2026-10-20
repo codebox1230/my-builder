@@ -95,6 +95,9 @@ Keep files ASCII-only - non-ASCII comment art once broke Windows YAML reads.
   runs `sdkmanager tools`, which no longer exists, and fails the job. The
   Android SDK is preinstalled; accept licenses and let Gradle download what
   it needs.
+- `reactivecircus/android-emulator-runner` executes its `script` with
+  `/usr/bin/sh` (dash), not bash. `set -o pipefail` dies with "Illegal
+  option -o pipefail"; use POSIX `set -eu` and bash-free syntax.
 
 ## SSH (agents operate the VMs directly from this PC)
 
