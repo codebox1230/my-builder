@@ -238,7 +238,7 @@ jobs:
       # "Security negotiation failed" against macOS native auth.
       - name: Enable Screen Sharing
         run: |
-          set -euo pipefail
+          set -uo pipefail
           PW="${{ secrets.VNC_PASSWORD }}"
           if [[ -z "$PW" ]]; then
             echo "VNC_PASSWORD secret is not set."
@@ -263,6 +263,28 @@ jobs:
           sudo chmod 644 /Library/Preferences/com.apple.VNCSettings.txt
           echo "Legacy VNC password stored in VNCSettings.txt (value masked in logs)."
 
+          # -- CRITICAL: enable the screen-capture daemon (replayd) --
+          # VNC "standard mode" mirrors the physical display by asking
+          # replayd to read the framebuffer. On hosted runners replayd is
+          # DISABLED, so screensharingd accepts the password, listens on
+          # 5900, and then serves a BLACK SCREEN. Enabling and bootstrapping
+          # it is what makes a real picture appear.
+          # Reference: macrun.dev "The Mac that logs you in and shows you
+          # nothing", and the community write-up on disabled replayd.
+          UID_N=$(id -u)
+          echo "Enabling replayd (screen capture daemon) for uid $UID_N"
+          launchctl enable "gui/$UID_N/com.apple.replayd" 2>/dev/null || true
+          launchctl bootstrap "gui/$UID_N" /System/Library/LaunchAgents/com.apple.replayd.plist 2>/dev/null || true
+          launchctl kickstart -k "gui/$UID_N/com.apple.replayd" 2>/dev/null || true
+          sudo launchctl enable system/com.apple.replayd 2>/dev/null || true
+          sudo launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.replayd.plist 2>/dev/null || true
+
+          # Since macOS 14 `kickstart -activate` refuses to run headless, so
+          # the Screen Sharing service is started through launchd instead.
+          sudo launchctl enable system/com.apple.screensharing 2>/dev/null || true
+          sudo launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
+
           printf '%s' "$PW" | sudo "$ARD" -activate -configure \
             -allowAccessFor -allUsers \
             -privs -all \
@@ -271,19 +293,49 @@ jobs:
             -restart -agent -menu
           sleep 3
 
-          # Screen Sharing can only capture the display if the daemon holds the
-          # Screen Recording permission. Grant it directly in the TCC database
-          # (SIP is disabled on hosted runners) so the framebuffer is not black.
-          TCCDB="/Library/Application Support/com.apple.TCC/TCC.db"
-          for client in /usr/libexec/ARDAgent /usr/sbin/screensharingd /usr/libexec/sscreensharingd; do
-            sudo sqlite3 "$TCCDB" "insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier_type,indirect_object_identifier,flags,last_modified) values ('kTCCServiceScreenCapture','$client',0,2,2,1,0,NULL,0,datetime('now'));" 2>/dev/null || true
+          # Screen Recording is a TCC privilege. On hosted runners it is not
+          # granted, so the sharing daemon serves a black screen. The system
+          # TCC database covers system daemons and the user database covers
+          # per-user processes; both are pre-granted here. SIP is disabled on
+          # hosted runners, so the rows can be written directly.
+          grant_tcc() {
+            local db="$1" client="$2"
+            for svc in kTCCServiceScreenCapture kTCCServiceAccessibility; do
+              sudo sqlite3 "$db" "insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier_type,indirect_object_identifier,flags,last_modified) values ('$svc','$client',0,2,2,1,0,NULL,0,datetime('now'));" 2>/dev/null || true
+            done
+          }
+          SYS_TCC="/Library/Application Support/com.apple.TCC/TCC.db"
+          USR_TCC="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+          for client in /bin/bash /bin/zsh /bin/sh /usr/bin/osascript \
+                        com.apple.screensharing.agent /usr/libexec/ARDAgent \
+                        /usr/sbin/screensharingd /usr/libexec/replayd; do
+            grant_tcc "$SYS_TCC" "$client"
           done
+          if [ -f "$USR_TCC" ]; then
+            for client in /bin/bash /bin/zsh /bin/sh /usr/bin/osascript \
+                          com.apple.screensharing.agent /usr/libexec/replayd; do
+              grant_tcc "$USR_TCC" "$client"
+            done
+          fi
+
+          # The replayd group container keeps a screen-capture approval list.
+          # Pre-seeding it avoids the "private window picker" modal that
+          # blocks the UI on macOS 14+.
+          GC="$HOME/Library/Group Containers/group.com.apple.replayd"
+          sudo mkdir -p "$GC" 2>/dev/null || true
+          for app in com.apple.screensharing.agent com.apple.ScreenSharing /bin/bash /bin/zsh; do
+            sudo defaults write "$GC/ScreenCaptureApprovals.plist" "$app" -date "3024-01-01 00:00:00 +0000" 2>/dev/null || true
+          done
+
           sudo killall screensharingd 2>/dev/null || true
           sleep 2
 
-          # Keep the display awake; a sleeping display renders as black.
+          # Keep the display awake and dismiss any running screensaver; a
+          # sleeping or screensaver-covered display renders as black.
+          killall ScreenSaverEngine 2>/dev/null || true
           sudo pmset -a displaysleep 0 sleep 0 disksleep 0 2>/dev/null || true
           sudo caffeinate -dimsu -t 7200 > /dev/null 2>&1 &
+          sleep 1
           caffeinate -u -t 3 > /dev/null 2>&1 || true
 
           if nc -z localhost 5900 2>/dev/null; then
@@ -423,6 +475,30 @@ jobs:
                   print("rectangles returned:", nrects)
                   if nrects == 0:
                       print("::warning title=Black Screen Risk::The server returned no framebuffer rectangles; the display has nothing to render.")
+                      sys.exit(0)
+                  # Read the raw rectangles and measure the picture. A black
+                  # desktop is two colours at near-zero brightness; a real
+                  # desktop is not. This is the only trustworthy check.
+                  x, y, rw, rh, enc = struct.unpack(">HHHHi", recvall(s, 12))
+                  if enc == 0:
+                      data = recvall(s, rw * rh * 4)
+                      colours = set()
+                      total = 0
+                      count = 0
+                      for i in range(0, len(data), 4):
+                          r, g, b = data[i], data[i + 1], data[i + 2]
+                          colours.add((r >> 3, g >> 3, b >> 3))
+                          total += (r + g + b) / 3
+                          count += 1
+                      mean = (total / count) if count else 0.0
+                      print("sampled pixels:", count)
+                      print("mean brightness: %.2f%%" % mean)
+                      print("distinct colours:", len(colours))
+                      if len(colours) > 8 and mean > 0.5:
+                          print("RESULT: REAL PICTURE")
+                      else:
+                          print("RESULT: BLACK SCREEN")
+                          print("::warning title=Black Screen::The framebuffer is blank. Screen Sharing will show a black screen.")
           except Exception as e:
               print("no framebuffer update received:", e)
               print("::warning title=Black Screen Risk::The server sent no framebuffer update; the display may be empty.")
