@@ -438,6 +438,9 @@ jobs:
           "$ADB" shell settings put global window_animation_scale 0
           "$ADB" shell settings put global transition_animation_scale 0
           "$ADB" shell settings put global animator_duration_scale 0
+          # Three-button navigation: the launcher UI is designed against a
+          # visible navbar, and the default gestural overlay hides it.
+          "$ADB" shell cmd overlay enable-exclusive --category com.android.internal.systemui.navbar.threebutton || true
           if [ "$ORIENTATION" = "landscape" ]; then
             "$ADB" shell settings put system accelerometer_rotation 0
             "$ADB" shell settings put system user_rotation 1
