@@ -506,7 +506,7 @@ jobs:
             release=$("$ADB" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r' || true)
             echo "[$(date -u +%H:%M:%S)] session alive - ${remaining}m left - android $release"
             sleep 60
-            elapsed=$(( elapsed + 60 ))
+            elapsed=$(( elapsed + 1 ))
           done
           echo "Session limit reached."
 
