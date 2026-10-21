@@ -373,17 +373,41 @@ jobs:
           PKG="system-images;android-${API_LEVEL};${TARGET};${ARCH}"
           echo ">>> installing $PKG"
           "$SDKM" "$PKG" "emulator" "platform-tools"
+          # avdmanager writes the AVD to the XDG location
+          # (~/.config/.android/avd) on these images, but the emulator
+          # binary only looks in $HOME/.android/avd and reports
+          # "Unknown AVD name [lab]". Point both at the same directory.
+          export ANDROID_AVD_HOME="$HOME/.config/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
           echo no | "$AVDM" create avd -n lab -k "$PKG" --device "$PROFILE" --force
           "$AVDM" list avd
+          # Fail loudly here rather than hanging the boot step later.
+          if ! "$SDK/emulator/emulator" -list-avds 2>/dev/null | grep -qx "lab"; then
+            echo "::error::the emulator cannot see the 'lab' AVD in $ANDROID_AVD_HOME"
+            ls -la "$ANDROID_AVD_HOME" || true
+            exit 1
+          fi
+          echo "emulator sees the AVD."
 
       - name: Boot emulator
         id: boot
         run: |
           set -euo pipefail
+          # The AVD lives in the XDG directory (see the Create AVD step).
+          export ANDROID_AVD_HOME="$HOME/.config/.android/avd"
           nohup "$SDK/emulator/emulator" -avd lab \
             -no-window -no-audio -no-boot-anim -no-snapshot \
             -gpu swiftshader_indirect -memory 2048 -cores 2 \
             > /tmp/emulator.log 2>&1 &
+          sleep 5
+          if ! grep -q "Unknown AVD name" /tmp/emulator.log 2>/dev/null; then
+            echo "emulator process started"
+          else
+            echo "::error::emulator could not find the AVD"
+            cat /tmp/emulator.log
+            exit 1
+          fi
           "$ADB" wait-for-device
           booted=""
           for i in $(seq 1 150); do
@@ -462,8 +486,11 @@ jobs:
           echo ""
           echo "  From your machine:"
           echo "    ssh -i ~/.ssh/cloud-builder runner@${{ steps.tailscale.outputs.ip }} \"adb -s ${{ steps.boot.outputs.serial }} shell input tap 100 200\""
-          echo "    scrcpy over the tunnel: ssh -N -L 5038:127.0.0.1:5037 -R 27183:127.0.0.1:27183 runner@${{ steps.tailscale.outputs.ip }}"
-          echo "    then: ADB_SERVER_SOCKET=tcp:127.0.0.1:5038 scrcpy"
+          echo ""
+          echo "  scrcpy (interactive window) - forward the device port, then connect:"
+          echo "    ssh -N -L 5555:127.0.0.1:5555 -i ~/.ssh/cloud-builder runner@${{ steps.tailscale.outputs.ip }}"
+          echo "    adb connect 127.0.0.1:5555"
+          echo "    scrcpy --serial=127.0.0.1:5555"
           echo ""
           echo "  Or use the lab UI:  python lab/lab.py"
           echo "  Session limit: ${{ inputs.session_hours }}h   End early: cancel this run"
