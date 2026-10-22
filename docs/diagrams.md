@@ -142,26 +142,28 @@ ASCII for reading in a terminal, Mermaid for rendering.
   |  ubuntu-24.04 runner (one long-lived job)                    |
   |                                                              |
   |   clone private repo -> build APK -> create AVD -> boot (KVM) |
-  |   -> install APK -> launch app                               |
+  |   -> install APK -> launch app -> three-button nav           |
   |                                                              |
-  |   +---------------------------+                             |
-  |   |  emulator (headless)      |                             |
-  |   |  ADB on 127.0.0.1:5037    |  <-- loopback only         |
-  |   +-------------+-------------+                             |
-  |                 |                                           |
-  |           sshd (port 22) ---- keys only                      |
+  |   +---------------------------+                              |
+  |   |  emulator (headless)      |                              |
+  |   |  ADB on 127.0.0.1:5037    |  <-- loopback only          |
+  |   +-------------+-------------+                              |
+  |                 |                                            |
+  |   sshd (22) + socat (5555) --- keys only                     |
   +-----------------|--------------------------------------------+
                     | WireGuard (outbound only)
       +-------------v--------------+
       |  YOUR DEVICES (tailnet)   |
-      |   adb -s emulator-5554     |
-      |   scrcpy (tunneled)        |
+      |   adb connect <ip>:5555   |
+      |   scrcpy / phone browser  |
       +----------------------------+
 ```
 
 The device is never published to the internet. ADB listens on the runner's
-loopback; the agent reaches it by running `adb` *on the far side of SSH*, or
-by forwarding the ADB socket and the scrcpy port over the same tunnel.
+loopback; the agent either runs `adb` *on the far side of SSH*, or republishes
+adbd on the tailnet with `socat` and connects to it directly. The direct route
+is the one that stays usable for scrcpy - an SSH port-forward stalls video
+while the process stays alive.
 
 ## Mermaid: build graph
 

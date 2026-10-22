@@ -1,0 +1,201 @@
+###############################################################################
+# linux-vm.yml
+#
+# Blank Ubuntu server for an interactive session. No source is cloned and no
+# build runs: the VM joins the tailnet, installs the SSH key, then holds.
+#
+# Access: ssh -i ~/.ssh/cloud-builder runner@<tailnet-ip>
+# Secrets: TAILSCALE_AUTHKEY, SSH_PUBKEY, ALLOWED_ACTORS
+###############################################################################
+
+name: Linux VM Session
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_hours:
+        description: "Max session hours (1-5)"
+        required: false
+        default: "2"
+
+permissions:
+  contents: read
+
+# One live Linux session. A new dispatch cancels the old one.
+concurrency:
+  group: linux-vm-session
+  cancel-in-progress: true
+
+jobs:
+  authorize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    environment: protected-cloud
+    outputs:
+      authorized: ${{ steps.check.outputs.authorized }}
+    steps:
+      - name: Validate actor identity
+        id: check
+        run: |
+          ACTOR="${{ github.actor }}"
+          OWNER="${{ github.repository_owner }}"
+          ALLOWED="${{ secrets.ALLOWED_ACTORS }}"
+
+          echo "Actor:  $ACTOR"
+          echo "Owner:  $OWNER"
+
+          if [[ "$ACTOR" == "$OWNER" ]]; then
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+            echo ">>> Authorized: repo owner."
+            exit 0
+          fi
+
+          if [[ -n "$ALLOWED" ]]; then
+            IFS=',' read -ra ACTORS <<< "$ALLOWED"
+            for allowed in "${ACTORS[@]}"; do
+              allowed=$(echo "$allowed" | xargs)
+              if [[ "$ACTOR" == "$allowed" ]]; then
+                echo "authorized=true" >> "$GITHUB_OUTPUT"
+                echo ">>> Authorized: in allowed list."
+                exit 0
+              fi
+            done
+          fi
+
+          echo "authorized=false" >> "$GITHUB_OUTPUT"
+          echo ">>> DENIED: '$ACTOR' is not authorized to run this workflow."
+          exit 1
+
+  session:
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    outputs:
+      tunnel_address: ${{ steps.tailscale.outputs.ip }}
+    steps:
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          HOURS="${{ inputs.session_hours }}"
+          if ! [[ "$HOURS" =~ ^[0-9]+$ ]] || [ "$HOURS" -lt 1 ] || [ "$HOURS" -gt 5 ]; then
+            echo "::error::session_hours must be 1-5 (got '$HOURS')"
+            exit 1
+          fi
+
+      - name: Setup Tailscale
+        id: tailscale
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TS_AUTHKEY" ]; then
+            echo "::error::TAILSCALE_AUTHKEY secret is not set"
+            exit 1
+          fi
+          sudo rm -rf /tmp/ts
+          mkdir -p /tmp/ts
+          curl -fsSL https://pkgs.tailscale.com/stable/tailscale_1.82.0_amd64.tgz -o /tmp/ts.tgz
+          sudo tar -xzf /tmp/ts.tgz -C /tmp/ts
+          TSBIN=$(sudo find /tmp/ts -type f -name tailscale -print -quit)
+          TSDAEMON=$(sudo find /tmp/ts -type f -name tailscaled -print -quit)
+          if [ -z "$TSBIN" ]; then
+            echo "::error::no tailscale binary in the tarball"
+            sudo find /tmp/ts | head -n 20
+            exit 1
+          fi
+          sudo install -m 0755 "$TSBIN" /usr/local/bin/tailscale
+          if [ -n "$TSDAEMON" ]; then
+            sudo install -m 0755 "$TSDAEMON" /usr/local/bin/tailscaled
+          fi
+          sudo mkdir -p /var/lib/tailscale
+          sudo nohup tailscaled --state=/var/lib/tailscale/tailscaled.state \
+            > /tmp/tailscaled.log 2>&1 &
+          sleep 6
+          sudo tailscale version || true
+          HOSTNAME="linux-builder-${{ github.run_id }}"
+          if ! sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOSTNAME" --accept-dns=false; then
+            echo ">>> default tun mode failed, retrying in userspace networking mode"
+            sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOSTNAME" --accept-dns=false --tun=userspace-networking
+          fi
+          sudo tailscale status > /tmp/ts-status.txt 2>&1 || true
+          head -n 3 /tmp/ts-status.txt || true
+          if ! grep -q . /tmp/ts-status.txt; then
+            echo "::error::tailscale did not come up"
+            sudo tail -n 20 /tmp/tailscaled.log || true
+            exit 1
+          fi
+          ip=""
+          for i in $(seq 1 30); do
+            ip=$(sudo tailscale ip -4 2>/dev/null | head -n 1 || true)
+            if [ -n "$ip" ]; then
+              break
+            fi
+            sleep 3
+          done
+          if [ -z "$ip" ]; then
+            echo "::error::no tailnet IP after 90 seconds"
+            exit 1
+          fi
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+          echo "Tailscale node $HOSTNAME at $ip"
+
+      - name: Install SSH server and key
+        env:
+          SSH_PUBKEY: ${{ secrets.SSH_PUBKEY }}
+        run: |
+          set -euo pipefail
+          if ! dpkg -s openssh-server > /dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
+          fi
+          if [ -z "$SSH_PUBKEY" ]; then
+            echo "::error::SSH_PUBKEY secret is not set"
+            exit 1
+          fi
+          sudo mkdir -p /home/runner/.ssh
+          printf '%s' "$SSH_PUBKEY" | tr -d '\r' | sed -e '/^[[:space:]]*$/d' \
+            | sudo tee /home/runner/.ssh/authorized_keys > /dev/null
+          sudo chmod 700 /home/runner/.ssh
+          sudo chmod 600 /home/runner/.ssh/authorized_keys
+          sudo chown -R runner:runner /home/runner/.ssh
+          sudo chmod 755 /home/runner
+          echo "installed key fingerprint:"
+          ssh-keygen -l -f /home/runner/.ssh/authorized_keys \
+            || { echo "::error::authorized_keys is not a valid key"; exit 1; }
+          sudo systemctl restart ssh 2>/dev/null || sudo /usr/sbin/sshd
+          sleep 2
+
+      - name: Print connection info
+        run: |
+          echo ""
+          echo "======================================================="
+          echo "  LINUX SESSION READY"
+          echo "======================================================="
+          echo "  Host:  runner@${{ steps.tailscale.outputs.ip }}"
+          echo ""
+          echo "  ssh -i ~/.ssh/cloud-builder runner@${{ steps.tailscale.outputs.ip }}"
+          echo ""
+          echo "  Blank Ubuntu runner: no repo cloned, no build run."
+          echo "  Session limit: ${{ inputs.session_hours }}h   End early: cancel this run"
+          echo "======================================================="
+
+      - name: Hold session
+        run: |
+          set -uo pipefail
+          max=$(( ${{ inputs.session_hours }} * 60 ))
+          elapsed=0
+          while [ "$elapsed" -lt "$max" ]; do
+            remaining=$(( max - elapsed ))
+            echo "[$(date -u +%H:%M:%S)] session alive - ${remaining}m left - $(uptime -p)"
+            sleep 60
+            elapsed=$(( elapsed + 1 ))
+          done
+          echo "Session limit reached."
+
+      - name: Cleanup
+        if: always()
+        run: |
+          sudo tailscale logout 2>/dev/null || true
+          sudo pkill tailscaled 2>/dev/null || true
+          echo "Cleanup done. The VM and its tailnet node are destroyed by GitHub."

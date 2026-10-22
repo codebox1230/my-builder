@@ -96,8 +96,9 @@ its control plane is a third party.
 | `build-private.yml` | `.github/workflows/` | headless build, artifact upload, cleanup |
 | `rdp-cloud-vm.yml` | `.github/workflows/` | Windows session: RDP + SSH + Tailscale |
 | `mac-screen.yml` | `.github/workflows/` | macOS session: VNC + SSH + Tailscale |
+| `linux-vm.yml` | `.github/workflows/` | blank Linux session: SSH + Tailscale, no clone or build |
 | `android-device-matrix.yml` | `.github/workflows/` | headless APK matrix on KVM emulators, artifacts only |
-| `android-screen.yml` | `.github/workflows/` | interactive Android session: build, boot AVD, install, hold for N hours, reachable over SSH |
+| `android-screen.yml` | `.github/workflows/` | interactive Android session: build, boot AVD, install, hold for N hours; ADB over SSH or republished on the tailnet |
 | `cli/cloudvm.ps1` | `cli/` | drive sessions from a terminal or agent |
 | `tools/validate-workflows.py` | `tools/` | pre-push syntax gate |
 | `tools/validate-docs.py` | `tools/` | pre-push docs gate: ASCII, links, secret scan |
@@ -126,8 +127,10 @@ its control plane is a third party.
  4. provision         GitHub boots VM, installs toolchain
  5. tunnel            Tailscale joins tailnet (ephemeral node)
   6. access surface    SSH (always) + RDP (Windows) or VNC (macOS)
+                       Linux sessions are SSH-only with no source or build;
                        Android sessions add ADB on the runner's loopback,
-                       reached over the same SSH tunnel
+                       optionally republished on the tailnet with socat
+                       for direct adb/scrcpy
  7. work              build / debug / verify
  8. cleanup           rm source, logout tailnet, disable remote access
  9. destroy           GitHub deallocates the VM

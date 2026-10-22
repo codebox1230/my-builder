@@ -9,7 +9,12 @@ and humans (desktop).
 |---|---|---|
 | Windows | RDP (`mstsc`) on 3389 | SSH on 22 |
 | macOS | Screen Sharing (VNC) on 5900 | SSH on 22 |
-| Linux | VNC/X11 (self-hosted only) | SSH on 22 |
+| Linux | none (headless) | SSH on 22 |
+| Android emulator | scrcpy, or a phone browser on 8000 | `adb` on 5555 |
+
+`linux-vm.yml` is a blank headless server: SSH only, no source clone, no
+build. The `runner` account has passwordless sudo. Copy files with `scp`, or
+clone the repo on the VM and build there.
 
 **macOS does not speak RDP.** It ships VNC Screen Sharing. A true RDP server
 on macOS means third-party licensed software (NuoRDS) which is pointless on a
@@ -75,6 +80,8 @@ Peer hostnames embed the run ID, which makes correlation trivial:
 |---|---|
 | `build-verify-<run_id>` | Windows session |
 | `mac-builder-<run_id>` | macOS session |
+| `linux-builder-<run_id>` | Linux session |
+| `android-builder-<run_id>` | Android session |
 
 IPs are in the `100.64.0.0/10` range. They change every run - a new VM, a
 new tailnet node.
@@ -92,6 +99,39 @@ Hardening already applied on the VM:
 | NLA (`UserAuthentication`) | 1 - credentials required before session start |
 | `SecurityLayer` | 2 - TLS handshake |
 | `MinEncryptionLevel` | 3 - 128-bit |
+
+## Android (adb over the tailnet)
+
+`android-screen.yml` keeps adbd bound to the runner's loopback. Publish it on
+the tailnet, then talk to the emulator directly - no port-forward to babysit:
+
+```bash
+ssh -i ~/.ssh/cloud-builder runner@<tailnet-ip> \
+  "sudo apt-get install -y socat && sudo socat \
+   TCP-LISTEN:5555,bind=<tailnet-ip>,fork,reuseaddr TCP:127.0.0.1:5555"
+# locally:
+adb connect <tailnet-ip>:5555
+scrcpy --serial=<tailnet-ip>:5555 --force-adb-forward
+```
+
+The SSH-forwarded variant works but stalls video while audio and input keep
+going, which is indistinguishable from a freeze. Direct adb does not.
+
+- Connect via the tailnet IP, never `127.0.0.1:5555`: adb auto-scans local
+  ports and adds a duplicate `emulator-5554` entry that confuses device
+  selection.
+- `--force-adb-forward` avoids the reverse-tunnel path that leaves video
+  working while input is dead.
+- On Windows the scrcpy window ignores `--always-on-top`; pin it topmost
+  (`SetWindowPos(HWND_TOPMOST)`) or it slides behind the browser and clicks
+  land in the wrong window.
+- No adb locally? Run it on the far side of SSH:
+  `ssh ... "adb -s emulator-5554 shell input tap 500 800"`.
+
+A phone on the tailnet can use a browser instead: classic ws-scrcpy on
+`http://<host>:8000` decodes with Broadway/tinyh264 (WASM), so plain HTTP is
+fine. The WebCodecs-based forks need a secure context and will list the
+device but refuse video.
 
 ## Screen Sharing (macOS, human path)
 
@@ -163,3 +203,7 @@ ever sees pushed state.
 | RDP client connects then disconnects | NLA rejected the credentials | confirm `RDP_PASSWORD` matches what the workflow set |
 | VNC `Security negotiation failed` | client forced Apple auth | use TigerVNC (standard auth), not RealVNC |
 | VNC `Authentication failure` | password mismatch | the password is exactly 8 chars |
+| `adb connect` adds a duplicate `emulator-5554` | adb auto-scanned local 5555 | connect via the tailnet IP, not `127.0.0.1` |
+| scrcpy shows video but input does nothing | reverse-tunnel path | `--force-adb-forward` |
+| scrcpy window ends up behind the browser | `--always-on-top` ignored on Windows | pin with `SetWindowPos(HWND_TOPMOST)` |
+| Phone browser lists the device but no video | WebCodecs needs HTTPS | use classic ws-scrcpy (WASM decoders) |

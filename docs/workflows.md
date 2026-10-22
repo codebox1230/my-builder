@@ -1,6 +1,6 @@
 # Workflow reference
 
-Five workflows. All live in `.github/workflows/`.
+Six workflows. All live in `.github/workflows/`.
 
 ## Quick matrix
 
@@ -9,10 +9,11 @@ Five workflows. All live in `.github/workflows/`.
 | `build-private.yml` | picker, default `windows-2022` | none - artifacts | none | unlimited |
 | `rdp-cloud-vm.yml` | `windows-2022` | RDP + SSH | authorize + environment | one at a time |
 | `mac-screen.yml` | `macos-latest` | VNC + SSH | authorize + environment | one at a time (`mac-screen-session`) |
+| `linux-vm.yml` | `ubuntu-24.04` | SSH only | authorize + environment | one at a time (`linux-vm-session`) |
 | `android-device-matrix.yml` | `ubuntu-24.04` matrix | none - artifacts | none | one matrix at a time |
-| `android-screen.yml` | `ubuntu-24.04` | ADB + scrcpy over SSH | authorize + environment | one at a time (cancels the previous) |
+| `android-screen.yml` | `ubuntu-24.04` | ADB + scrcpy over the tailnet | authorize + environment | one at a time (cancels the previous) |
 
-All five are triggered with `workflow_dispatch`. `build-private.yml` also
+All six are triggered with `workflow_dispatch`. `build-private.yml` also
 accepts `repository_dispatch` from the private-repo trigger.
 
 ---
@@ -58,6 +59,40 @@ gh workflow run build-private.yml --repo codebox1230/my-builder \
   -f branch=main \
   -f runner=ubuntu-latest
 ```
+
+---
+
+## linux-vm.yml
+
+Blank Ubuntu server. Nothing is cloned or built: the VM joins the tailnet,
+installs the SSH key, then holds. Intended for agent-driven work where the
+source arrives later over SCP or `git clone`.
+
+### Inputs
+
+| Input | Required | Default | Notes |
+|---|---|---|---|
+| `session_hours` | no | `2` | 1-5 |
+
+### Steps in order
+
+1. `authorize` - repo owner or `ALLOWED_ACTORS`
+2. validate `session_hours`
+3. join the tailnet as `linux-builder-<run_id>`
+4. install `openssh-server` and `SSH_PUBKEY` for `runner`
+5. print `ssh -i ~/.ssh/cloud-builder runner@<tailnet-ip>`
+6. hold for `session_hours`, then log out of the tailnet and destroy the VM
+
+### Access
+
+SSH only, no desktop:
+
+```bash
+ssh -i ~/.ssh/cloud-builder runner@<tailnet-ip>
+```
+
+The `runner` account has passwordless sudo. Move files with `scp`, or clone
+the repo on the VM. One session at a time; a new dispatch cancels the old.
 
 ---
 
@@ -203,7 +238,8 @@ Firebase/Play layers that add real hardware.
 
 Interactive Android session. One job does the whole loop: clone and build the
 APK, boot a matching KVM AVD headless, install and launch the app, then hold
-the device for N hours so an agent can drive it over SSH.
+the device for N hours. The device is drivable over SSH, or directly from the
+tailnet once adbd is published with `socat`.
 
 ### Inputs
 
@@ -226,9 +262,12 @@ the device for N hours so an agent can drive it over SSH.
 
 1. `authorize` - actor must be the repo owner or listed in `ALLOWED_ACTORS`
 2. `session` - clone the private repo and build the APK on the runner
-3. create the AVD and boot it on KVM, headless
-4. install the APK and launch the launcher activity
-5. join the tailnet, publish the SSH access details
+3. create the AVD and boot it on KVM, headless. `ANDROID_AVD_HOME` points
+   the emulator at the XDG directory `avdmanager` writes, otherwise the boot
+   hangs on `Unknown AVD name [lab]`
+4. install the APK, launch the launcher activity, enable three-button
+   navigation
+5. join the tailnet, publish the SSH/adb access details
 6. hold for `session_hours`, then wipe the runner
 
 ### Access
@@ -241,14 +280,21 @@ ssh -i ~/.ssh/cloud-builder runner@<tailnet-ip> \
   "adb -s emulator-5554 shell input tap 500 800"
 ```
 
-For a live screen, tunnel ADB and scrcpy out of the runner:
+For a live screen and direct input, publish adbd on the tailnet instead of
+tunnelling. An SSH port-forward stalls video while scrcpy stays alive, which
+looks like a freeze:
 
 ```bash
-ssh -N -L 5038:127.0.0.1:5037 -R 27183:127.0.0.1:27183 \
-  -i ~/.ssh/cloud-builder runner@<tailnet-ip>
-# then, locally:
-ADB_SERVER_SOCKET=tcp:127.0.0.1:5038 scrcpy
+ssh -i ~/.ssh/cloud-builder runner@<tailnet-ip> \
+  "sudo apt-get install -y socat && sudo socat \
+   TCP-LISTEN:5555,bind=<tailnet-ip>,fork,reuseaddr TCP:127.0.0.1:5555"
+# locally:
+adb connect <tailnet-ip>:5555
+scrcpy --serial=<tailnet-ip>:5555 --force-adb-forward
 ```
+
+A phone browser on the tailnet can use classic ws-scrcpy on port 8000
+(Broadway/tinyh264 WASM decoders; the WebCodecs forks need HTTPS).
 
 ### Concurrency
 
@@ -259,9 +305,10 @@ device is left behind.
 
 ### Status
 
-Built and validated, but **not yet proven green** - the two runs to date
-were one cancelled and one in progress. Treat it as experimental until a
-completion is observed. The headless matrix workflow is the proven path.
+Proven green. A 4-hour run completed with the KVM AVD booted, the APK
+installed and launched, three-button navigation enabled, and the device
+driven over adb and scrcpy for the full hold. The headless matrix workflow
+remains the cheaper path for pass/fail testing.
 
 ### Example
 
@@ -319,7 +366,7 @@ python tools/validate-docs.py
 
 `validate-workflows.py` YAML-parses every workflow, then syntax-checks each
 step's script block - PowerShell via the .NET parser, bash via `bash -n`, with
-`${{ }}` expressions stubbed out. Must report 56/56.
+`${{ }}` expressions stubbed out. Must report 65/65.
 
 `validate-docs.py` checks every markdown file for non-ASCII characters,
 broken internal links, and leaked secret values. Must report "all clean".

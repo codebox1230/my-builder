@@ -77,31 +77,59 @@ gh workflow run android-screen.yml --repo codebox1230/my-builder \
   -f session_hours=2
 ```
 
-It clones and builds the APK, boots a KVM AVD headless, installs and launches
-the app, then holds the device for `session_hours`. The device is never
-published to the internet - ADB stays on the runner's loopback and you reach
-it over SSH:
+Pass `apk_url` instead of `private_repo` to install a prebuilt APK. The run
+boots a KVM AVD headless, installs and launches the app, switches the device
+to three-button navigation, then holds it for `session_hours`.
+
+### Reaching the device
+
+ADB stays on the runner's loopback by default. Two ways in, both over the
+tailnet:
+
+1. Run `adb` on the far side of SSH, with no forwarding:
 
 ```bash
 ssh -i ~/.ssh/cloud-builder runner@<tailnet-ip> \
   "adb -s emulator-5554 shell input tap 500 800"
 ```
 
-For a live screen, tunnel ADB and scrcpy out of the runner:
+2. Publish adbd on the tailnet for a direct `adb connect` / scrcpy. This is
+   much more stable than an SSH port-forward, which stalls video while
+   scrcpy stays alive - it looks exactly like a freeze:
 
 ```bash
-ssh -N -L 5038:127.0.0.1:5037 -R 27183:127.0.0.1:27183 \
-  -i ~/.ssh/cloud-builder runner@<tailnet-ip>
-# then, locally:
-ADB_SERVER_SOCKET=tcp:127.0.0.1:5038 scrcpy
+ssh -i ~/.ssh/cloud-builder runner@<tailnet-ip> \
+  "sudo apt-get install -y socat && sudo socat \
+   TCP-LISTEN:5555,bind=<tailnet-ip>,fork,reuseaddr TCP:127.0.0.1:5555"
+# locally:
+adb connect <tailnet-ip>:5555
+scrcpy --serial=<tailnet-ip>:5555 --force-adb-forward
 ```
 
-Exactly one session exists at a time - a new dispatch cancels the running one.
-The local `lab/` dashboard (not published) drives this session from a browser.
+`--force-adb-forward` matters: scrcpy's default reverse-tunnel path can
+leave video working while input is dead. If the window ends up behind other
+windows (it ignores `--always-on-top` on Windows), pin it with
+`SetWindowPos(HWND_TOPMOST)`.
 
-**Status:** built and validated, but not yet proven green - the two runs to
-date were one cancelled and one in progress. Prefer the headless matrix
-workflow until a completion is observed.
+### Phone / browser
+
+Classic ws-scrcpy serves the device at `http://<host>:8000` and works in a
+phone browser on the tailnet. It decodes with Broadway/tinyh264 (WASM), so
+plain HTTP is fine. The newer WebCodecs-based forks need a secure context
+(HTTPS) and will list the device but refuse video over plain HTTP.
+
+```bash
+npm install --ignore-scripts   # node-pty's postinstall fails on Windows
+npm run dist
+node dist/index.js             # http://<tailnet-ip>:8000
+```
+
+Exactly one session exists at a time - a new dispatch cancels the running
+one. The local `lab/` dashboard (not published) also drives this session from
+a browser.
+
+**Status:** proven green - a 4-hour run completed with the emulator booted,
+the APK installed and launched, and the device drivable over adb and scrcpy.
 
 ## Layer 2: Firebase Test Lab (free quota)
 

@@ -31,8 +31,9 @@ uploaded, source wiped.
 | `build-private.yml` | picker, default `windows-2022` | Headless build, no desktop. `repo` input is REQUIRED and defaults to the placeholder `YOUR_USERNAME/YOUR_PRIVATE_REPO` - always pass a real `owner/name`. |
 | `rdp-cloud-vm.yml` | `windows-2022` | Windows session: RDP + SSH over Tailscale/Cloudflare. |
 | `mac-screen.yml` | `macos-latest` | macOS session: Screen Sharing + SSH over Tailscale. |
+| `linux-vm.yml` | `ubuntu-24.04` | Blank Linux server session: Tailscale + SSH only, no source clone or build. Holds for N hours; `concurrency` keeps one alive. |
 | `android-device-matrix.yml` | `ubuntu-24.04` matrix | Headless APK matrix across AVD profiles and API levels on KVM emulators. No desktop, no tunnel, reports as artifacts. Pinned to 24.04: `ubuntu-latest` is migrating to Ubuntu 26. |
-| `android-screen.yml` | `ubuntu-24.04` | Interactive Android session: build APK, boot a KVM AVD, install + launch, then hold for N hours. ADB stays on the runner's loopback; the agent reaches it over SSH (`adb ...` remotely, scrcpy via a tunnel). `concurrency` cancels the previous session, so exactly one exists at a time. |
+| `android-screen.yml` | `ubuntu-24.04` | Interactive Android session: build APK, boot a KVM AVD with three-button navigation, install + launch, then hold for N hours. ADB listens on the runner's loopback; expose it on the tailnet with `socat` for direct `adb connect` + scrcpy, or drive it over SSH. `concurrency` cancels the previous session, so exactly one exists at a time. |
 
 - Session workflows gate on an `authorize` job (actor must be repo owner or
   listed in `ALLOWED_ACTORS`) plus the `protected-cloud` environment.
@@ -64,7 +65,7 @@ python tools/validate-docs.py
 ```
 `validate-workflows.py` YAML-parses every workflow, then syntax-checks each
 step's script block: PowerShell via the .NET parser, bash via `bash -n`.
-`${{ }}` expressions are stubbed before parsing. Must be 56/56.
+`${{ }}` expressions are stubbed before parsing. Must be 65/65.
 
 `validate-docs.py` checks every markdown file for non-ASCII characters,
 broken internal links, and leaked secret values (passwords, auth keys,
@@ -103,6 +104,35 @@ Keep files ASCII-only - non-ASCII comment art once broke Windows YAML reads.
   dies with "Illegal option -o pipefail". Generate a script file in a prior
   step and call `bash "$RUNNER_TEMP/emu-test.sh"` as a one-line script, or
   keep every line standalone and bash-free.
+- `avdmanager` writes the AVD to the XDG path `~/.config/.android/avd`, but
+  the `emulator` binary only looks in `~/.android/avd` and fails with
+  `Unknown AVD name [lab]`. The create step reports success and the boot
+  step then hangs until timeout. Set
+  `ANDROID_AVD_HOME="$HOME/.config/.android/avd"` in both steps (exported to
+  `$GITHUB_ENV`) and assert `emulator -list-avds` sees the AVD.
+- The session hold loop counts minutes: `max=$((hours*60))` with a 60 s
+  sleep means `elapsed=$((elapsed + 1))`, not `+60`. Incrementing by 60 ends
+  a 4-hour session after 4 iterations, about 4 minutes.
+- Expose the emulator's adbd on the tailnet instead of an SSH tunnel (the
+  tunnel stalls video while scrcpy stays alive, which looks like a freeze):
+  `sudo socat TCP-LISTEN:5555,bind=<tailnet-ip>,fork,reuseaddr
+  TCP:127.0.0.1:5555`, then `adb connect <tailnet-ip>:5555`. socat is not
+  preinstalled - `sudo apt-get install -y socat` first.
+- scrcpy over a TCP device: pass `--force-adb-forward`. The default
+  reverse-tunnel path is what leaves video working while input is dead.
+  `--always-on-top` and `--window-x` are silently ignored on Windows; pin
+  the window with `SetWindowPos(HWND_TOPMOST)` after launch or it ends up
+  behind the browser and clicks land elsewhere.
+- A browser client for a phone must decode in software: use classic
+  ws-scrcpy (Broadway/tinyh264 WASM) over plain `http://<tailnet-ip>:8000`.
+  The newer ws-scrcpy-web fork decodes with WebCodecs, which browsers only
+  expose in a secure context, so it shows the device list but refuses video
+  over plain HTTP. On Windows, `npm install --ignore-scripts` in ws-scrcpy:
+  the `node-pty` postinstall dies with `spawn EINVAL`, and the terminal tab
+  is not needed for screen mirroring.
+- API 34 images default to gesture navigation. For a visible navbar:
+  `adb shell cmd overlay enable-exclusive --category
+  com.android.internal.systemui.navbar.threebutton`.
 
 ## SSH (agents operate the VMs directly from this PC)
 

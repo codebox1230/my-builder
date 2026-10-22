@@ -21,15 +21,16 @@ against a public repo moves all compute off your laptop: no local CPU spikes,
 no fan noise, no battery drain. The private source is cloned, built, and
 deleted on the VM.
 
-## Five ways in
+## Six ways in
 
 | Need | Workflow | Access |
 |---|---|---|
 | Compile only | `build-private.yml` | none - artifacts download |
 | Windows desktop | `rdp-cloud-vm.yml` | `mstsc` over Tailscale, or SSH for agents |
 | macOS desktop | `mac-screen.yml` | Screen Sharing over Tailscale, or SSH for agents |
+| Linux server | `linux-vm.yml` | SSH over Tailscale; blank VM, no source or build |
 | Android device matrix | `android-device-matrix.yml` | none - APK tested on emulators, reports as artifacts |
-| Android live device | `android-screen.yml` | ADB + scrcpy over SSH; the emulator is never published |
+| Android live device | `android-screen.yml` | ADB over Tailscale: direct `adb connect` + scrcpy, or a phone browser; the emulator is never published |
 
 ## Agent access
 
@@ -48,7 +49,7 @@ See [docs/remote-access.md](docs/remote-access.md) and
 ## Layout
 
 ```
-.github/workflows/   the five workflows (this is the product)
+.github/workflows/   the six workflows (this is the product)
 cli/cloudvm.ps1      single-file CLI over gh + Tailscale + OpenSSH
 tools/               validator: YAML parse + per-step shell syntax check
 docs/                architecture, data flow, security, runbook, ...
@@ -83,6 +84,6 @@ browser, not this public one.
 Read [AGENTS.md](AGENTS.md) first. In short:
 
 - `gh` must be authenticated as `codebox1230`
-- run `python tools/validate-workflows.py` before every push (must be 56/56)
+- run `python tools/validate-workflows.py` before every push (must be 65/65)
 - one idea per commit, push straight to `main`
 - keep files ASCII-only

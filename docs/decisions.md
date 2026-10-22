@@ -229,5 +229,29 @@ file - the workflow just vanishes from the Actions tab. A PowerShell parse
 error only surfaces after a 5-minute VM boot. Catching both locally turns a
 5-minute feedback loop into a 2-second one.
 
-**Evidence.** 56/56 blocks pass at time of writing (29/29 before the Android
+**Evidence.** 65/65 blocks pass at time of writing (29/29 before the Android
 matrix workflow was added, 38/38 before the Android screen session was added).
+
+---
+
+## D17: Publish adbd on the tailnet instead of tunnelling it
+
+**Decision.** `android-screen.yml` keeps adbd on the runner's loopback. The
+operator republishes it on the VM's tailnet interface with `socat`, and both
+scrcpy and a phone browser connect to that address directly. SSH remains the
+control path for commands.
+
+**Why.** An SSH port-forward of the ADB socket and the scrcpy video port
+stalls video while the process stays alive - the screen looks frozen but
+input still lands, which sends debugging in the wrong direction. A single
+`socat` listener has no tunnel state to renegotiate and survives adb
+reconnects. It also costs nothing to leave running for the life of the VM,
+and the device still never touches the public internet - only tailnet peers
+can reach it.
+
+**Cost.** `socat` is not preinstalled, so the setup installs it with
+`apt-get`. The listener dies with the runner, which is the desired lifetime.
+
+**Alternative rejected.** Reverse-forwarding the scrcpy port with
+`ssh -R 27183:127.0.0.1:27183`: video stalls while audio and input continue,
+and the tunnel needs manual recovery after every adb reconnect.

@@ -9,7 +9,8 @@
 #   2. build the APK there
 #   3. create + boot a matching AVD (KVM accelerated, headless)
 #   4. install the APK and launch it
-#   5. join the tailnet so the device is reachable (ADB over SSH, scrcpy)
+#   5. join the tailnet so the device is reachable (ADB over SSH, or adbd
+#      republished on the tailnet with socat for direct adb/scrcpy)
 #   6. hold the session for N hours, then wipe everything
 #
 # The device is NOT published to the internet. ADB stays on the runner's
@@ -490,10 +491,10 @@ jobs:
           echo "  From your machine:"
           echo "    ssh -i ~/.ssh/cloud-builder runner@${{ steps.tailscale.outputs.ip }} \"adb -s ${{ steps.boot.outputs.serial }} shell input tap 100 200\""
           echo ""
-          echo "  scrcpy (interactive window) - forward the device port, then connect:"
-          echo "    ssh -N -L 5555:127.0.0.1:5555 -i ~/.ssh/cloud-builder runner@${{ steps.tailscale.outputs.ip }}"
-          echo "    adb connect 127.0.0.1:5555"
-          echo "    scrcpy --serial=127.0.0.1:5555"
+          echo "  scrcpy (interactive window) - expose adbd on the tailnet, then connect:"
+          echo "    ssh -i ~/.ssh/cloud-builder runner@${{ steps.tailscale.outputs.ip }} \"sudo apt-get install -y socat && sudo nohup socat TCP-LISTEN:5555,bind=${{ steps.tailscale.outputs.ip }},fork,reuseaddr TCP:127.0.0.1:5555 >/tmp/socat-adb.log 2>&1 &\""
+          echo "    adb connect ${{ steps.tailscale.outputs.ip }}:5555"
+          echo "    scrcpy --serial=${{ steps.tailscale.outputs.ip }}:5555 --force-adb-forward"
           echo ""
           echo "  Or use the lab UI:  python lab/lab.py"
           echo "  Session limit: ${{ inputs.session_hours }}h   End early: cancel this run"
