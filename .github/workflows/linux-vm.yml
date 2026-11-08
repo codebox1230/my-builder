@@ -166,6 +166,16 @@ jobs:
           sudo systemctl restart ssh 2>/dev/null || sudo /usr/sbin/sshd
           sleep 2
 
+      - name: Enable browser sandboxes (unprivileged userns)
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            echo "kernel.apparmor_restrict_unprivileged_userns=0" \
+              | sudo tee /etc/sysctl.d/99-userns.conf > /dev/null
+          else
+            echo "userns restriction sysctl not present; nothing to do"
+          fi
+
       - name: Print connection info
         run: |
           echo ""
